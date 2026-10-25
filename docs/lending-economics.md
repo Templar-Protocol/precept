@@ -11,8 +11,9 @@ anyone can liquidate them by paying off their debt in exchange for the collatera
 If the collateral runs out before the debt is paid, the gap is taken from the lenders of that
 reserve, pro rata, in the same transaction. There is no insurance fund; the "backstop" is
 activation plumbing with no value. Prices come from external oracle networks through Templar's
-proxy; liquidators are external firms. When prices go stale, liquidations stop but ordinary
-withdrawals do not.
+proxy; liquidators are external firms. When prices go stale, liquidations and loss recognition stop; a lender with no
+debt in the reserve can still make an ordinary withdrawal, because a plain withdrawal reads no price — any action that
+needs a health check does not.
 
 ## 1. Reserves, lenders, borrowers
 
@@ -44,7 +45,11 @@ value after `l_factor` haircuts ([pool/src/pool/health_factor.rs:27-84](https://
 factor. Below 1.0 the position is liquidatable.
 
 Both sides are priced with the pool oracle (section 6). A position is only re-checked when its
-owner acts (borrow, withdraw collateral) or when someone liquidates it. Nothing happens
+owner acts (borrow, withdraw collateral, withdraw a plain deposit while holding debt in that reserve
+([pool/src/pool/actions.rs:406-408](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L406-L408)),
+or delete their own liquidation auction
+([pool/src/pool/actions.rs:313-316](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L313-L316)))
+or when someone liquidates it. Nothing happens
 automatically when a price moves; a keeper has to act.
 
 ## 3. Liquidation auctions
@@ -97,16 +102,26 @@ their transaction, so in practice a liquidator either has the cash to repay the 
 ### Stale auctions and the free-collateral window
 
 From block 400 until the auction is deleted, anyone can take the entire remaining lot for
-nothing. The borrower's debt is not repaid; it stays on the books and lands on the lenders
-(section 5). The auction can only be removed by the borrower's own `DeleteLiquidationAuction`
-(allowed only while the pool is at status 0 or 1) or by anyone via `delete_stale_auction` once
-500 blocks have passed ([pool/src/auctions/auction.rs:126-172](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/auction.rs#L126-L172)). Blocks 400–500 therefore have no
-remedy at all.
+nothing. The filler repays a bid that has scaled to zero, so the borrower's debt is not repaid by that fill; whether
+it lands on the lenders (section 5) depends on what the borrower has left. The bad-debt handler runs on a full fill,
+and it returns without defaulting anything while the borrower's remaining collateral still has value
+([pool/src/auctions/user_liquidation_auction.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/user_liquidation_auction.rs#L218-L220),
+[pool/src/pool/bad_debt.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/bad_debt.rs#L60-L74)).
+The auction can be removed by the borrower's own `DeleteLiquidationAuction` — no age check, but it requires the pool
+to be at status 0 or 1 and the borrower's remaining positions to pass the health check afterwards
+([pool/src/pool/actions.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L313-L322),
+[pool/src/auctions/auction.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/auction.rs#L150-L155),
+[pool/src/pool/pool.rs:76-80](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/pool.rs#L76-L80),
+[pool/src/pool/pool.rs:146-154](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/pool.rs#L146-L154))
+— or by anyone via `delete_stale_auction` once 500 blocks have passed
+([pool/src/auctions/auction.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/auction.rs#L126-L138)).
+A borrower still under the liquidation threshold therefore has no way to cancel the free-fill window in blocks
+400–500: self-deletion fails their health check and no third party can delete yet.
 
 No participant is obliged to prevent an auction reaching block 400: liquidators are external
-(section 6) and borrower deletion is voluntary. Reaching it is therefore treated as a monitoring
-failure on Templar's side, handled by the alerting schedule in section 6, not as something to
-order a third party to prevent. "Let it expire and recreate it" is not a remedy: recreation needs
+(section 6) and borrower deletion is voluntary. Nothing on-chain enforces that an auction is filled or
+deleted before block 400, and no third party can be ordered to prevent it. "Let it expire and
+recreate it" is not a remedy: recreation needs
 a fresh oracle price, which a stale-oracle scenario will not supply, and the lot has already been
 given away.
 
@@ -124,7 +139,8 @@ constraints, not the total size of the position, decide whether a liquidation su
 
 - **Time.** Fills that land after block 400 repay nothing (section 3, "Stale auctions"). Partial
   fills shrink the existing auction; they do not restart its clock. Any lot still unfilled at 400
-  is given away and its debt lands on the lenders, and a recreated auction needs a fresh oracle
+  is given away and, if what the borrower keeps values to zero, its debt lands on the lenders at the next
+  settlement, and a recreated auction needs a fresh oracle
   price (section 6).
 - **DEX depth.** If the collateral is thin on the DEX, selling it pushes the price down and the
   next fill recovers less. This is where a liquidation "fails to sell for enough".
@@ -147,7 +163,8 @@ Anyone can also trigger it later with `bad_debt(user)` once no auction is live.
 In order:
 
 1. **Set-off.** If the borrower also has ordinary (non-collateral) deposits in the same reserve
-   they owe, those are burned against the debt first. Event: `debt_setoff`, with topics
+   they owe, those are burned against the debt first; a supply that covers the debt in full settles it here, with no
+   default. Event: `debt_setoff`, with topics
    `[name, user, asset]` ([pool/src/events.rs:185-199](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/events.rs#L185-L199)).
 2. **Default to lenders.** Whatever debt remains is written off against the lenders of that
    reserve by lowering `b_rate` ([pool/src/pool/user.rs:110-160](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/user.rs#L110-L160),
@@ -155,10 +172,12 @@ In order:
    reserve loses the same percentage, immediately. Event: `defaulted_debt`, with topics
    `[name, user, asset]` and the defaulted d-token amount as data
    ([pool/src/events.rs:179-183](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/events.rs#L179-L183)).
-3. **Orphan the dust.** Any collateral the borrower still holds that is worth zero in the oracle
-   is moved to a pool-owned position nobody can withdraw, so a later price move cannot revive it
-   for the borrower. Event: `collateral_orphaned`, with topics `[name, user, asset]`
-   ([pool/src/events.rs:201-204](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/events.rs#L201-L204)).
+3. **Orphan the dust.** If a debt was actually defaulted, any collateral the borrower still holds is moved to a
+   pool-owned position nobody can withdraw, so a later price move cannot revive it for the borrower. A same-reserve
+   supply that repays the debt in full defaults nothing, and that collateral stays with the borrower
+   ([pool/src/pool/bad_debt.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/bad_debt.rs#L96-L116)).
+   Event: `collateral_orphaned`, with topics `[name, user, asset]`
+   ([pool/src/events.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/events.rs#L201-L204)).
 
 What this means for a lender:
 
@@ -210,7 +229,7 @@ A stale price only affects positions that hold that asset, but for those positio
 
 | Action | Blocked by a stale price? |
 | --- | --- |
-| Deposit, repay | No |
+| Deposit, repay | No, unless the depositor has any debt and is supplying collateral into a reserve where they hold none ([pool/src/pool/actions.rs:442-447](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L442-L447)) |
 | Withdraw ordinary deposit | No, unless the lender also has debt in that reserve |
 | Withdraw collateral, borrow | Yes, if the account has any debt |
 | Create a liquidation auction | **Yes** |
@@ -219,8 +238,9 @@ A stale price only affects positions that hold that asset, but for those positio
 | `bad_debt(user)` | Yes, unless the borrower has no collateral left to value |
 | Delete a stale auction | No |
 
-So a stale oracle freezes liquidations and loss recognition while leaving ordinary withdrawals
-open. That widens the window in section 5. Oracle liveness is therefore a lending-safety
+So a stale oracle freezes liquidations and loss recognition while leaving ordinary withdrawals by
+lenders with no debt in that reserve open — the table above gives the exceptions. That widens the window in section 5.
+Oracle liveness is therefore a lending-safety
 requirement, not a convenience.
 
 ### Oracle sources and refresh
@@ -239,8 +259,10 @@ afterwards. It refuses a parent price dated ahead of ledger time
 No contract in this repository produces prices. Two things still have to be done by somebody, and both are
 permissionless: calling the proxy's `refresh` often enough that its newest accepted price stays inside the asset's
 `max_age_secs`, and extending the oracle, pool and backstop instances so their ledger entries are not evicted. The
-adapter extends its own instance only when it is read, so in a quiet market with no borrows, liquidations or reads
-nothing is extending it, and it can be evicted while the external feeds are perfectly healthy. Somebody has to do
+adapter's own instance is extended when it is read and when anyone calls its public `extend_ttl`
+([pool-oracle-adapter/src/lib.rs:112-114](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool-oracle-adapter/src/lib.rs#L112-L114)),
+so in a quiet market with no borrows, liquidations or reads nothing extends it unless somebody calls
+`extend_ttl`, and it can be evicted while the external feeds are perfectly healthy. Somebody has to do
 both, every market, continuously — an unattended oracle is an oracle that eventually stops answering.
 
 ### Liquidators

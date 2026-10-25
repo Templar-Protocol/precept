@@ -24,8 +24,8 @@ of a second copy of the same math.
 ## Status
 
 * Releases are published on [GitHub](https://github.com/Templar-Protocol/precept/releases) with per-file checksums.
-  The Guardian review of this fork underlies v0.1.0; v0.1.1 is the same contract source rebuilt on a newer toolchain
-  plus post-review changes (see [Security and audits](security.md)).
+  The Guardian review of this fork underlies v0.1.0; v0.1.1 is the Guardian-reviewed v0.1.0 source plus small
+  post-review changes, rebuilt on a newer toolchain (see [Security and audits](security.md)).
 * **No official Precept market is live yet.** Until one is published at
   [Official markets](official-markets.md), no contract address should be trusted from anywhere else.
 
@@ -36,7 +36,7 @@ of a second copy of the same math.
 * [Lending economics](lending-economics.md) — what a lender is exposed to, where a loss lands, and how the oracle
   and interest rate are constructed.
 * [Risks](risks.md) — what can go wrong and who can act: every admin and governance lever that affects a pool.
-* [Official markets](official-markets.md) — the only place Precept contract addresses are published.
+* [Official markets](official-markets.md) — the official mainnet markets, and the addresses to trust.
 * [Changes from Blend v2](changes-from-blend-v2.md) — a stock-versus-Precept table, with a permalink to the code on
   both sides of every row.
 * [Security and audits](security.md) — the Guardian review, the upstream audits, how to reproduce a release build,

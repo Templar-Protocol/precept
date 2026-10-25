@@ -24,7 +24,7 @@ The public documentation is maintained in this repository under [`docs/`](docs/R
 - [Risks](docs/risks.md) — what can go wrong and every admin or governance lever that affects a market.
 - [Changes from Blend v2](docs/changes-from-blend-v2.md) — a stock-versus-Precept table with a permalink to the code
   on both sides of every row.
-- [Official markets](docs/official-markets.md) — the only place Precept contract addresses are published.
+- [Official markets](docs/official-markets.md) — the official mainnet markets, and the addresses to trust.
 - [Security and audits](docs/security.md) — reviews, reproducible builds, and how to report a vulnerability.
 
 For the mechanics this fork inherits unchanged, read the upstream
@@ -74,7 +74,7 @@ These can be found at the path:
 target/wasm32v1-none/optimized
 ```
 
-The `pool-oracle-adapter` builds separately: `cd pool-oracle-adapter && just optimize`.
+The `pool-oracle-adapter` builds separately: `cd pool-oracle-adapter && just preflight && just optimize`.
 
 Released builds are published on the
 [releases page](https://github.com/Templar-Protocol/precept/releases) with the four artifacts and a `SHA256SUMS` file

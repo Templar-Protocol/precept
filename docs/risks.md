@@ -34,7 +34,7 @@ No other lender group, and no backstop, absorbs it.
 | --- | --- | --- |
 | A borrower defaults and the reserve is short | The reserve's b-dollar exchange rate is lowered; every b-token holder in that reserve loses proportionally | Liquidation bidders, if they bid; nobody else |
 | A liquidation is under-collateralised | Your b-dollars of that reserve absorb the shortfall left by the fills that never happened, and the auction lot is quoted in b-tokens | Nothing |
-| The oracle stops publishing | Any operation that reads a price traps, including withdrawals for a user with an open position | The oracle's own governance and its source set |
+| The oracle stops publishing | Any operation that reads a price traps — a borrow, a collateral or same-reserve withdrawal by an account that still owes, and opening or clearing a liquidation auction | The oracle's own governance and its source set |
 | The pool admin freezes the market | Status 4 stops new borrows, supplies and cancellations; withdrawals, repayments and auction fills continue | Nothing — the decision is one-way |
 | The backstop's position moves sharply | Automatic on-ice/freeze statuses depend on the backstop's balance and on how much of it is queued for withdrawal | Nothing forces the backstop to stay |
 | An asset is disabled | Deposits, collateral deposits and borrows of that one asset stop | The pool admin, who can disable it |
@@ -46,17 +46,37 @@ so sending a token directly to a pool contract does not make its lenders richer.
 
 ## The oracle is the single point of failure
 
-Every operation that checks health loads a price: borrow, supply collateral, liquidate, and — because a withdrawal of
-collateral by a user with open debt re-checks that user's health — most withdrawals too. A price is accepted only if the
+A health check prices the acting account's own positions, and it runs only when that account has liabilities at all
+([pool/src/pool/submit.rs:214-219](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/submit.rs#L214-L219)).
+The requests that ask for one are borrow
+([pool/src/pool/actions.rs:494-511](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L494-L511)),
+withdrawing collateral
+([pool/src/pool/actions.rs:467-484](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L467-L484)),
+a plain withdrawal from a reserve in which the withdrawer also has debt
+([pool/src/pool/actions.rs:406-408](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L406-L408)),
+and filling or deleting a user-liquidation auction — where the positions priced are the filler's or deleter's own,
+not the borrower's
+([pool/src/pool/actions.rs:253-262](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L253-L262),
+[pool/src/pool/actions.rs:313-316](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L313-L316)).
+A fill that clears the auction also values the borrower's remaining collateral before anything is written off
+([pool/src/auctions/user_liquidation_auction.rs:218-220](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/user_liquidation_auction.rs#L218-L220),
+[pool/src/pool/bad_debt.rs:63-74](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/bad_debt.rs#L63-L74)).
+Opening a liquidation auction prices the borrower's position directly
+([pool/src/pool/health_factor.rs:27-42](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/health_factor.rs#L27-L42),
+[pool/src/auctions/user_liquidation_auction.rs:47](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/user_liquidation_auction.rs#L47)).
+Supplying collateral does not check health; it loads one price only when a borrower who already has debt opens a
+collateral position in a reserve they have not used as collateral before
+([pool/src/pool/actions.rs:445-447](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L445-L447)).
+A price is accepted only if the
 oracle answers, is not older than 24 hours, is not dated in the future, is positive, and reports 7 decimals
 ([pool/src/pool/pool.rs:123-143](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/pool.rs#L123-L143),
 [pool/src/pool/pool.rs:100-113](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/pool.rs#L100-L113));
 any failure traps with `InvalidPrice`, and a missing price traps rather than returning a default. Prices are read only
 when a reserve is actually used by an operation, so a reserve can be configured with a feed that has never been
 exercised
-([pool/src/pool/health_factor.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/health_factor.rs#L57-L84)).
-When a price is refused, lending and borrowing for that market stop; a lender with no open position can still exit,
-because a plain withdrawal does not read prices.
+([pool/src/pool/health_factor.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/health_factor.rs#L35-L42)).
+When a price is refused, lending and borrowing for that market stop; a lender who owes nothing in the reserve they are
+withdrawing from can still exit, because a plain withdrawal reads no price unless the withdrawer has debt in that reserve.
 
 Precept markets price through the pool-oracle adapter in this repository, which reads a Templar proxy oracle
 ([pool-oracle-adapter/src/lib.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool-oracle-adapter/src/lib.rs#L51-L134)).
@@ -96,8 +116,9 @@ a proposal lapses after ten days
 | Lever | Effect | Bound |
 | --- | --- | --- |
 | `set_status` | 0 active, 2 on-ice, 3 permissionless on-ice, **4 admin freeze** | **4 is permanent** — any later `set_status` other than 4 reverts, even the admin's ([pool/src/pool/status.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/status.rs#L84-L141)) |
-| Queue / cancel a reserve change | Switch an existing reserve off, behind a timelock | After activation that is the only change an existing reserve can undergo: no parameter of a live reserve can be edited, including its supply cap, a disabled reserve cannot be re-enabled, and no new reserve can be added ([pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L85-L88), [pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L115-L134)) |
-| `propose_admin` / `accept_admin` | Hand the pool to another admin | Two signatures required |
+| `queue_set_reserve` / `cancel_set_reserve` | Queue switching an existing reserve off, or cancel a queued change before it is applied | The queued change waits one week before it can be applied ([pool/src/pool/config.rs:94-98](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L94-L98)). The admin can cancel it at any time before it is applied: the cancel is an unconditional delete, with no check on the unlock time or the pool status ([pool/src/pool/config.rs:110-112](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L110-L112)), and it needs only the admin's authorisation ([pool/src/contract.rs:420-428](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/contract.rs#L420-L428)). **Any account** can apply it with `set_reserve` once the week has passed ([pool/src/contract.rs:430-437](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/contract.rs#L430-L437)). After activation that is the only change an existing reserve can undergo: no parameter of a live reserve can be edited, including its supply cap, a disabled reserve cannot be re-enabled, and no new reserve can be added ([pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L85-L88), [pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L115-L134)) |
+| `propose_admin` / `accept_admin` | Hand the pool to another admin | Two signatures required: the current admin proposes and the new admin accepts. The handover takes effect immediately when `accept_admin` is called, with no delay ([pool/src/contract.rs:383-404](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/contract.rs#L383-L404)) |
+| Configuration before activation | While a pool is still in its `setup` status, the admin can add reserves and set their parameters (within the reserve-metadata bounds) with no timelock: a queued change unlocks at once | The window closes when the admin moves the pool out of `setup` with `set_status` ([pool/src/pool/config.rs:85-98](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L85-L98), [pool/src/pool/status.rs:84-141](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/status.rs#L84-L141)) |
 
 Nothing else in a live pool is editable. The oracle address, the backstop's interest share, the position limit and the
 collateral minimum are fixed at deployment: stock Blend's `update_pool`, the entrypoint that would move them, is
@@ -119,8 +140,8 @@ A reserve has an `enabled` flag, not a separate administrator. Supplying, supply
 with `ReserveDisabled` when the flag is off
 ([pool/src/pool/reserve.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/reserve.rs#L222-L227)).
 Withdrawing that asset and filling auctions against it are not gated on it: an existing lender can still leave, and an
-underwater position can still be cleared. Only the pool admin changes the flag, and after activation only in the
-disable direction — an existing reserve can be turned off, and a reserve that is off cannot be turned back on
+underwater position can still be cleared. Only the pool admin can queue a change to the flag, and after activation only in
+the disable direction, a week later — an existing reserve can be turned off, and a reserve that is off cannot be turned back on
 ([pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L115-L134),
 [pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L211-L218)).
 
@@ -165,17 +186,58 @@ proxy call into a SEP-40 price. What the oracle's governance contract can still 
 
 | Power | How it works | Reference |
 | --- | --- | --- |
-| Change the sources configured for an asset, or an asset's maximum accepted age | A proposal is created, waits out a time-to-live, then is executed | [contract/proxy-oracle/soroban/governance-contract/src/engine.rs:114-142](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L114-L142) |
-| Halt an asset's price | A manual trip on one asset, which also waits for its proposal time-to-live before it is executed | [contract/proxy-oracle/soroban/governance-contract/src/engine.rs:185-212](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L185-L212) |
-| Replace the runtime contract, or change which source contracts feed an asset | Only the runtime contract's owner may call these; the owner is the governance contract itself | [contract/proxy-oracle/soroban/contract/src/lib.rs:131-196](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L131-L196) |
-| Appoint or revoke governance roles | The governance admin, whose address is fixed at initialisation | [contract/proxy-oracle/soroban/governance-contract/src/lib.rs:99-135](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/lib.rs#L99-L135) |
+| Change the sources configured for an asset, or an asset's maximum accepted age | A `set_proxy` proposal, created and executed by the proxy-configuration role (or an admin); it waits out its time-to-live first | [engine.rs:75-83](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L75-L83), [roles per action: governance-common/src/lib.rs:170-197](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-common/src/lib.rs#L170-L197) |
+| Remove an asset from the proxy | A `remove_proxy` proposal de-lists the asset and deletes its configuration, breaker and price-history state, so the proxy has no price to give for it | [engine.rs:84-89](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L84-L89), [contract/src/lib.rs:194-205](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L194-L205) |
+| Configure, add, remove, re-arm or change the enforcement of a circuit breaker | Proposals of the same kind; the first three need the proxy-configuration role, re-arm and enforcement the breaker-operator role (an admin can do any of them) | [engine.rs:90-145](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L90-L145) |
+| Halt an asset's price | A manual trip on one asset, which also waits for its proposal time-to-live before it is executed | [engine.rs:146-160](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L146-L160) |
+| Replace the runtime contract's code | An `upgrade` proposal, which needs an admin; the runtime accepts it only from its owner | [engine.rs:208-219](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L208-L219), [contract/src/lib.rs:138-163](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L138-L163) |
+| Transfer or renounce ownership of the runtime contract | Two-step transfer, accept and renounce proposals, which need an admin | [engine.rs:161-188](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L161-L188), [contract/src/lib.rs:407-413](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L407-L413) |
+| Change how long a kind of proposal waits | A `set_action_ttl` proposal; an admin for admin-only kinds, the proxy-configuration role otherwise | [engine.rs:189-199](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L189-L199), [governance-common/src/lib.rs:190-197](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-common/src/lib.rs#L190-L197) |
+| Appoint or revoke governance roles, including admin | A `set_role` proposal, which needs an admin | [engine.rs:200-207](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L200-L207), [roles.rs:27-49](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/roles.rs#L27-L49) |
 
-The waiting time is a parameter, not a fixed floor: proposals expire and re-queue against a time-to-live set when the
-governance contract is initialised and adjustable through the same proposal path
-([contract/proxy-oracle/soroban/governance-common/src/lib.rs:331-335](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-common/src/lib.rs#L331-L335)).
-Actions are authorised against a single required role per action type (or the admin), so the split between who may
-propose and who may execute is a configuration choice, not a property of the contract
+Who holds those roles is not fixed. Admin is a role with any number of members, not a single address: the account given
+when the governance contract is initialised starts as the only admin
+([contract/proxy-oracle/soroban/governance-contract/src/lib.rs:43-68](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/lib.rs#L43-L68)),
+but admin membership is itself a governance action: an admin can grant admin to another account or revoke it, and the
+only guard is that the last admin cannot be removed
+([contract/proxy-oracle/soroban/governance-contract/src/roles.rs:31-49](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/roles.rs#L31-L49)).
+An admin also passes the role check for every other action
 ([contract/proxy-oracle/soroban/governance-contract/src/engine.rs:30-42](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L30-L42)).
+
+The governed arrangement in the table applies only while the runtime contract's owner is the governance contract. The
+owner is whatever address the runtime contract's constructor was given — a deployment choice, not something the contract
+enforces
+([contract/proxy-oracle/soroban/contract/src/lib.rs:129-136](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L129-L136)) —
+and ownership can later be transferred or renounced
+([contract/proxy-oracle/soroban/contract/src/lib.rs:407-413](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L407-L413)).
+If the owner is a plain account, that account can call `set_proxy`, `set_manual_trip` and `upgrade` directly, with no
+proposal and no waiting time
+([contract/proxy-oracle/soroban/contract/src/lib.rs:138-163](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L138-L163),
+[contract/proxy-oracle/soroban/contract/src/lib.rs:165-192](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L165-L192),
+[contract/proxy-oracle/soroban/contract/src/lib.rs:327-360](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L327-L360)).
+
+The waiting time is a parameter, not a fixed floor. Every kind of proposal starts with the same time-to-live, set when
+the governance contract is initialised
+([contract/proxy-oracle/soroban/governance-contract/src/lib.rs:43-68](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/lib.rs#L43-L68)),
+and each kind can then be changed through a `set_action_ttl` proposal
+([contract/proxy-oracle/soroban/governance-contract/src/engine.rs:189-199](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L189-L199)).
+A proposal waits for the larger of its kind's configured time-to-live and the one its proposer asks for, up to a
+180-day ceiling
+([contract/proxy-oracle/soroban/governance-contract/src/engine.rs:44-59](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L44-L59),
+[contract/proxy-oracle/soroban/governance-common/src/lib.rs:11-12](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-common/src/lib.rs#L11-L12)),
+and the contract refuses to execute it before that time has passed
+([contract/proxy-oracle/governance-kernel/src/lib.rs:452-477](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/governance-kernel/src/lib.rs#L452-L477)).
+There is no minimum: the only check on a new time-to-live is the ceiling
+([contract/proxy-oracle/soroban/governance-common/src/lib.rs:258-260](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-common/src/lib.rs#L258-L260)),
+so it can be set to zero, and a proposal with a zero time-to-live can be executed as soon as it exists
+([contract/proxy-oracle/governance-kernel/src/lib.rs:44-46](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/governance-kernel/src/lib.rs#L44-L46)).
+Lowering a time-to-live is itself delayed by the longer of the set-time-to-live proposal's own wait and the target's
+([contract/proxy-oracle/soroban/governance-common/src/lib.rs:223-232](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-common/src/lib.rs#L223-L232)).
+Actions are authorised against a single required role per action type (or the admin), and the same role check applies
+to creating, cancelling and executing a proposal, so the split between who may propose and who may execute is a
+configuration choice, not a property of the contract
+([contract/proxy-oracle/soroban/governance-contract/src/engine.rs:30-42](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L30-L42),
+[contract/proxy-oracle/soroban/governance-contract/src/lib.rs:94-167](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/lib.rs#L94-L167)).
 
 What no one can change about a live market: the pool's oracle address is fixed at deployment, and the 7-decimal price
 format is required by the pool's own checks.
@@ -183,8 +245,10 @@ format is required by the pool's own checks.
 ## What nobody can change
 
 The pool, the backstop and the pool factory have no upgrade entrypoint — there is no function in any of the three that
-replaces their compiled code, and the only way to change a live market's behaviour is to deploy a new pool and move
-users to it. A latent bug found after a market is live stays in that market for its whole life.
+replaces their compiled code, so a latent bug found after a market is live stays in that market for its whole life,
+and changing what one of these contracts does takes a new deployment and moving users to it. Oracle behaviour is
+governed separately, and it is a real lever over how a live market prices — see [Oracle governance](#oracle-governance)
+above.
 
 ## What anyone can do
 
@@ -196,3 +260,5 @@ Precept has no privileged liquidator. These are open to any account:
 * Settle a liquidated position's residual bad debt and orphan its collateral
   ([pool/src/contract.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/contract.rs#L593-L597)).
 * Trigger the pool's status recomputation, and call the oracle's `refresh`.
+* Apply a queued reserve change once its one-week timelock has passed, with `set_reserve`
+  ([pool/src/contract.rs:430-437](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/contract.rs#L430-L437)).

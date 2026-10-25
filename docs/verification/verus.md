@@ -1,14 +1,14 @@
 # Verus operational guide
 
-[`VERIFICATION.md`](../../VERIFICATION.md) owns proof results, mathematical domains
+[`VERIFICATION.md`](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/VERIFICATION.md) owns proof results, mathematical domains
 and the production-refinement boundary. This guide covers the pinned Verus tools
-and their invocation through the [shared local gate](../../VERIFICATION.md#reproducing-this).
+and their invocation through the [shared local gate](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/VERIFICATION.md#reproducing-this).
 
 ## Toolchain
 
 Use Linux and Python 3.11+. Provision the Verus release, bundled solver/libraries
 and isolated Rust compiler pinned in
-[`verification/verus/toolchain.json`](../../verification/verus/toolchain.json).
+[`verification/verus/toolchain.json`](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/verification/verus/toolchain.json).
 That file contains immutable downloads, checksums and compiler/component pins.
 Provision explicitly under containment; existing verified installations are reused:
 
@@ -37,8 +37,8 @@ repaired. Installation is explicit; verification does not install missing tools.
 ## Execution and verdicts
 
 Run `make verify-local` from the repository root after the shared prerequisites
-are satisfied. [`scripts/verify_verus.py`](../../scripts/verify_verus.py) selects
-[`supply_delta.rs`](../../verification/verus/supply_delta.rs), enables `--no-cheating`,
+are satisfied. [`scripts/verify_verus.py`](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/scripts/verify_verus.py) selects
+[`supply_delta.rs`](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/verification/verus/supply_delta.rs), enables `--no-cheating`,
 uses one verifier thread and checks the structured JSON result against the exact
 required function set and pinned commit.
 

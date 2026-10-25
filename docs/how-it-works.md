@@ -48,13 +48,20 @@ where `x-rats` is 7 decimals ([pool/src/pool/health_factor.rs](https://github.co
 "Effective" means the b-dollar and d-dollar quantities are converted with the reserve's exchange rates and scaled by
 that reserve's collateral factor.
 
-Two floors apply to anyone with open debt. A borrow, a supply-collateral deposit or any other action that re-checks
-health fails with `InvalidHf` if the account would end up below 1.0, and with `MinCollateralNotMet` if its effective
-collateral would fall below the pool's `min_collateral`
-([pool/src/pool/submit.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/submit.rs#L212-L238));
+Two floors apply to anyone with open debt. A borrow, a collateral withdrawal, an auction fill, the removal of one's
+own liquidation auction, or a plain withdrawal from a reserve the account is already borrowing in re-checks health,
+and the action fails with `InvalidHf` if the account would end up below 1.0, and with `MinCollateralNotMet` if its
+effective collateral would fall below the pool's `min_collateral`
+([pool/src/pool/actions.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L253-L322),
+[pool/src/pool/actions.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L406-L408),
+[pool/src/pool/actions.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L467-L515),
+[pool/src/pool/submit.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/submit.rs#L212-L238));
 `min_collateral` is a plain non-negative number chosen when the pool is created
 ([pool-factory/src/pool_factory.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool-factory/src/pool_factory.rs#L84-L87))
-and cannot be changed afterwards. A position is liquidatable below 1.0, and a *partial* liquidation must leave the
+and cannot be changed afterwards. A supply-collateral deposit is not health-checked: it reads the reserve's price
+only when a borrower takes collateral in a reserve it did not already hold, and refuses the deposit if that price
+is unusable ([pool/src/pool/actions.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L433-L457)).
+A position is liquidatable below 1.0, and a *partial* liquidation must leave the
 borrower between 1.03 and 1.15 health — outside that band the auction is rejected as too small or too large
 ([pool/src/auctions/user_liquidation_auction.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/user_liquidation_auction.rs#L92-L201));
 a request that covers all of the borrower's positions and more than 95% of them is treated as a full liquidation
@@ -86,9 +93,15 @@ in pool tokens rather than in x-rats.
   it took.
 
 A bidder with an existing position is not forced to liquidate itself: if a fill would push the bidder's own health
-factor to the liquidation threshold or below, the fill is rejected. A borrower can remove an auction against them once
-it has aged out, and a bidder can remove a stale auction
-([pool/src/auctions/auction.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/auction.rs#L126-L172)).
+factor to the liquidation threshold or below, the fill is rejected. A borrower can have an auction against them
+removed at any age — their own `DeleteLiquidationAuction` only requires that their remaining positions then pass the
+health check, and that the pool is at status 0 or 1
+([pool/src/pool/actions.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L313-L322),
+[pool/src/auctions/auction.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/auction.rs#L150-L155),
+[pool/src/pool/pool.rs:76-80](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/pool.rs#L76-L80),
+[pool/src/pool/pool.rs:146-154](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/pool.rs#L146-L154))
+— while anyone can remove an auction once it is 500 blocks old
+([pool/src/auctions/auction.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/auction.rs#L126-L138)).
 
 ## When there is nothing left to bid
 
@@ -98,6 +111,8 @@ A defaulted position whose collateral is worth nothing is settled in one `bad_de
 1. **Setoff.** Whatever the user supplied in the liability reserve itself cancels the debt directly, and emits
    `debt_setoff` with topics `[name, user, asset]` and the amounts in the data
    ([pool/src/events.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/events.rs#L188-L198)).
+   If that supply repays the debt in full, the default and orphan steps do not run and the collateral stays with the
+   user ([pool/src/pool/bad_debt.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/bad_debt.rs#L96-L116)).
 2. **Default to the reserve's lenders.** The remaining debt lowers that reserve's b-dollar exchange rate, so every
    b-token holder in it absorbs it pro rata. This emits `defaulted_debt` with topics `[name, user, asset]` and the
    defaulted d-token amount in the data
@@ -122,23 +137,31 @@ asked.
 `bad_debt` only runs after the position has been cleared through auctions: it reverts while a user-liquidation
 auction for that user is still open
 ([pool/src/pool/bad_debt.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/bad_debt.rs#L20-L22)).
-Settling a position completely is therefore two calls — fills first, then `bad_debt` — and the events show exactly
-what was set off, what was socialised, and what was orphaned.
+A fill that takes the last of a user's auction runs the bad-debt handler in the same transaction
+([pool/src/auctions/user_liquidation_auction.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/auctions/user_liquidation_auction.rs#L218-L220)),
+so such a position is settled in that one call; a position left with debt and nothing to value after a partial fill —
+or after nobody filled at all — is settled by a later `bad_debt(user)` call. Either way the events show exactly what
+was set off, what was socialised, and what was orphaned.
 
 ## Who runs the pool, and which levers stay
 
-A pool is deployed from the factory by the account that will administer it, which also supplies the pool name, the
-oracle and the backstop and factory addresses
-([pool-factory/src/pool_factory.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool-factory/src/pool_factory.rs#L59-L87));
+A pool is deployed from the factory by the account that will administer it, which supplies the pool name, a creation
+salt, the oracle address, the backstop's share of interest (which must be zero), the maximum number of positions and
+the minimum collateral for a borrow. The backstop and the BLND token addresses are not chosen per pool: they come from
+the factory's own configuration, fixed when the factory itself was deployed
+([pool-factory/src/pool_factory.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool-factory/src/pool_factory.rs#L59-L107),
+[pool-factory/src/storage.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool-factory/src/storage.rs#L19-L25));
 reserves are configured afterwards, by the admin, before the market is activated. The admin's levers after activation
 are deliberately narrow, and they are listed in full on [Risks](risks.md). The points that matter to a lender:
 
 * Reserve settings are **disable-only after activation**. Once a market is live, an existing reserve's collateral
-  factor, reserve factor, distribution, limits, token contracts and interest curve cannot be changed, and a reserve can
-  only be turned off — never back on. No new reserve can be introduced either
+  factor, liability factor, target and maximum utilization, interest-curve parameters (`r_base`, `r_one`, `r_two`,
+  `r_three`, `reactivity`), supply cap, minimum position size, decimal count and index cannot be changed
+  ([pool/src/storage.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/storage.rs#L58-L73),
+  [pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L211-L227)),
+  and a reserve can only be turned off — never back on. No new reserve can be introduced either
   ([pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L85-L88),
-  [pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L115-L134),
-  [pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L211-L227)).
+  [pool/src/pool/config.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/config.rs#L115-L134)).
 * Everything else about a live pool is likewise frozen. Stock Blend's `update_pool` — the entrypoint that would move
   the oracle address, the take rate, the position limit or the collateral minimum — is switched off
   ([pool/src/contract.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/contract.rs#L406-L408)).
