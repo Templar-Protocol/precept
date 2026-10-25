@@ -77,7 +77,8 @@ spacing is never required, just not wrong-casing hex or breaking sort.
 
 ## CLI
 
-From any directory (`REGISTRY` below is this directory):
+Run from the repository root (or pass the absolute path to `registry.py`
+from anywhere — it locates the registry files next to itself, not by cwd):
 
     python3 registry/registry.py add    --network testnet records.jsonl  # or - for stdin
     python3 registry/registry.py add    --network testnet records.jsonl --update

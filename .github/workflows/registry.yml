@@ -47,16 +47,25 @@ jobs:
       MAINNET_RPC: ${{ vars.MAINNET_RPC }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # Full history so the base SHA below exists locally for git diff.
+          fetch-depth: 0
+          persist-credentials: false
       - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
         with:
           version: 28.1.0
       - name: On-chain verify
         env:
-          PR: ${{ github.event.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
-            if ! gh pr diff --name-only "$PR" | grep -q '^registry/'; then
+            # Fail closed: any git failure errors the job (set -e + command
+            # substitution), and a detection that cannot see the diff verifies
+            # rather than silently skipping. A missing base SHA is an error too.
+            test -n "$BASE_SHA"
+            changed=$(git diff --name-only "$BASE_SHA" "$GITHUB_SHA")
+            if ! grep -q '^registry/' <<<"$changed"; then
               echo "registry files unchanged; on-chain verify not required"
               exit 0
             fi

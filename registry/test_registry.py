@@ -63,13 +63,13 @@ class RegistryTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         registry.DIR = self.dir
-        self.fetch = registry.fetch
+        self.fetch, self.rpc = registry.fetch, registry.rpc
         for net in registry.NETWORKS:
             self.write_lines(net, [])
 
     def tearDown(self):
         registry.DIR = None
-        registry.fetch = self.fetch
+        registry.fetch, registry.rpc = self.fetch, self.rpc
         self.tmp.cleanup()
 
     def write_lines(self, net, recs):
@@ -86,8 +86,8 @@ class RegistryTest(unittest.TestCase):
         self.write_lines("testnet", recs)
 
     def read(self, net="testnet"):
-        text = (self.dir / f"{net}.jsonl").read_text()
-        return [json.loads(l) for l in text.splitlines()]
+        text = (self.dir / f"{net}.jsonl").read_text(encoding="utf-8")
+        return [json.loads(l) for l in text.split("\n")[:-1]]
 
     def assertClean(self, net="testnet"):
         errs = registry.load(net)[1]
@@ -95,10 +95,27 @@ class RegistryTest(unittest.TestCase):
 
     # ---- add ---------------------------------------------------------------
 
+    def test_line_separators_in_strings_roundtrip(self):
+        # U+2028/2029/0085 are raw in canonical output (ensure_ascii=False) and
+        # must not be treated as line breaks when the file is read back.
+        rec = bare(label="a\u2028b\u2029c\u0085d")
+        code, out = self.run_cli("add", "--network", "testnet", self.input_file([rec]))
+        self.assertEqual(code, 0, out)
+        self.assertClean()
+        self.assertEqual(self.read(), [rec])
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 0, out)
+
+    def test_crlf_file_is_not_canonical(self):
+        (self.dir / "testnet.jsonl").write_bytes((registry.dump(bare()) + "\r\n").encode())
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 1)
+        self.assertIn("not canonical", out)
+
     def test_add_writes_canonical_order(self):
         code, out = self.run_cli("add", "--network", "testnet", self.input_file([factory(), contract(), wasm()]))
         self.assertEqual((code, out.strip()), (0, "testnet: 3 added, 0 updated, 0 unchanged"))
-        lines = (self.dir / "testnet.jsonl").read_text().splitlines()
+        lines = (self.dir / "testnet.jsonl").read_text(encoding="utf-8").split("\n")[:-1]
         self.assertEqual([json.loads(l)["kind"] for l in lines], ["contract", "contract", "wasm"])
         self.assertEqual(lines, [registry.dump(r) for r in (contract(), factory(), wasm())])
         self.assertTrue((self.dir / "testnet.jsonl").read_text().endswith("\n"))
@@ -267,7 +284,7 @@ class RegistryTest(unittest.TestCase):
         self.assertIn("on-chain wasm " + "b" * 64, out)
         self.assertIn("ok   wasm", out)
 
-    def test_verify_ok_and_missing_code(self):
+    def test_verify_ok(self):
         self.seed(contract(), factory(wasm_hash=None), wasm())
         registry.fetch = lambda url, keys: {
             k: (self.instance_xdr("a" * 64) if k == registry.instance_key(contract()["id"]) else "x") for k in keys
@@ -275,6 +292,41 @@ class RegistryTest(unittest.TestCase):
         code, out = self.run_cli("verify", "--network", "testnet", "--rpc", "http://rpc")
         self.assertEqual(code, 0, out)
         self.assertIn("0 failures", out)
+
+    def test_verify_missing_code(self):
+        self.seed(contract(), factory(wasm_hash=None), wasm())
+        iid = registry.instance_key(contract()["id"])
+        registry.fetch = lambda url, keys: {k: self.instance_xdr("a" * 64) for k in keys if k == iid}
+        code, out = self.run_cli("verify", "--network", "testnet")
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL wasm", out)
+        self.assertIn("code not live", out)
+        self.assertIn("ok   contract demo/pool", out)
+
+    def test_verify_no_live_instance(self):
+        self.seed(contract(), factory(wasm_hash=None), wasm())
+        code_k = registry.code_key("a" * 64)
+        registry.fetch = lambda url, keys: {k: "x" for k in keys if k == code_k}
+        code, out = self.run_cli("verify", "--network", "testnet")
+        self.assertEqual(code, 1)
+        self.assertIn("no live instance", out)
+        self.assertIn("ok   wasm", out)
+
+    def test_fetch_batches_keys_by_100(self):
+        sizes = []
+
+        def fake_rpc(url, method, params):
+            self.assertEqual((url, method), ("http://rpc", "getLedgerEntries"))
+            sizes.append(len(params["keys"]))
+            if len(params["keys"]) == 50:
+                return {}  # no "entries" at all must be tolerated
+            return {"entries": [{"key": params["keys"][0], "xdr": "x"}]}
+
+        registry.rpc = fake_rpc
+        keys = [str(i) for i in range(250)]
+        found = registry.fetch("http://rpc", keys)
+        self.assertEqual(sizes, [100, 100, 50])
+        self.assertEqual(set(found), {"0", "100"})
 
     def test_verify_mainnet_needs_rpc(self):
         (self.dir / "mainnet.jsonl").write_text(registry.dump(wasm(network="mainnet")) + "\n")

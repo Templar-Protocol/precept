@@ -218,11 +218,17 @@ def load(network):
     label = f"{path.name}"
     if not path.exists():
         return [], [f"{label}: file missing"]
-    text = path.read_text(encoding="utf-8")
+    # Read bytes strictly: universal-newline decoding would hide a CRLF file
+    # that `check` must report as non-canonical. Split on "\n" only, matching
+    # the writer — raw U+2028/2029/0085 inside strings are not line breaks.
+    text = path.read_bytes().decode("utf-8")
     records, errs, seen, prev = [], [], {}, None
     if text and not text.endswith("\n"):
         errs.append(f"{label}: missing final newline")
-    for n, line in enumerate(text.splitlines(), 1):
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    for n, line in enumerate(lines, 1):
         where = f"{label}:{n}"
         if not line.strip():
             errs.append(f"{where}: blank line")
