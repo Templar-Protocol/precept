@@ -1,0 +1,69 @@
+name: registry
+# The in-git deployment registry (registry/) is read by the frontend straight
+# from this repo and written by curators via PRs and by the precept-internal
+# deploy tooling via registry/registry.py. Every PR runs the offline suite
+# (unit tests + schema/canonical-order `check`); PRs that touch registry/**
+# additionally verify it against live chain state, as does any push to main
+# that changes it.
+#
+# registry verify talks to the Soroban JSON-RPC getLedgerEntries with the
+# Python standard library (no CLI dependency, same ledger entries the CLI
+# reads). The pinned CLI action below keeps `stellar contract info` available
+# as an independent cross-check for the job and for operators reproducing a
+# failure, installed the same SHA-pinned way as release.yml.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+    paths:
+      - registry/**
+      - .github/workflows/registry.yml
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on:
+      - ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Unit tests
+        run: python3 -m unittest discover -s registry -v
+      - name: Registry check
+        run: python3 registry/registry.py check
+
+  verify:
+    needs: check
+    runs-on:
+      - ubuntu-latest
+    env:
+      # Set as a repository variable once mainnet.jsonl has entries; verify
+      # then fails with a clear message if it is missing.
+      MAINNET_RPC: ${{ vars.MAINNET_RPC }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
+        with:
+          version: 28.1.0
+      - name: On-chain verify
+        env:
+          PR: ${{ github.event.number }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
+            if ! gh pr diff --name-only "$PR" | grep -q '^registry/'; then
+              echo "registry files unchanged; on-chain verify not required"
+              exit 0
+            fi
+          fi
+          python3 registry/registry.py verify --network testnet
+          if [ -s registry/mainnet.jsonl ]; then
+            python3 registry/registry.py verify --network mainnet ${MAINNET_RPC:+--rpc "$MAINNET_RPC"}
+          else
+            echo "mainnet.jsonl is empty; nothing to verify"
+          fi
