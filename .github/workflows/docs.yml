@@ -3,6 +3,9 @@ name: docs
 # GitBook has no write access to this repo (no GitHub App is installed); this
 # workflow pushes the import request instead. The import uses force: true, so
 # it overwrites any edits made in the GitBook UI. Change the docs by PR.
+# The API returns once the import has started, so a green run means GitBook
+# accepted the request, not that the import finished; check the GitBook
+# revision history after the first runs.
 #
 # One-time setup: create the GitBook space and an API token, then create a
 # GitHub environment named `gitbook` limited to the main branch, holding the
@@ -60,7 +63,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           persist-credentials: false
-      - name: Import into GitBook
+      - name: Request GitBook import
         env:
           GITBOOK_TOKEN: ${{ secrets.GITBOOK_TOKEN }}
           GITBOOK_SPACE_ID: ${{ vars.GITBOOK_SPACE_ID }}
@@ -83,9 +86,9 @@ jobs:
             --arg ts "$(git log -1 --format=%cI)" \
             --argjson standalone "${STANDALONE:-false}" \
             '{url: $url, ref: "refs/heads/main", repoTreeURL: $tree, repoCommitURL: $commit, timestamp: $ts, force: true, standalone: $standalone}')
-          curl -fsS -X POST \
+          curl -fsS --connect-timeout 30 --max-time 120 -X POST \
             -H "Authorization: Bearer $GITBOOK_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$body" \
             "https://api.gitbook.com/v1/spaces/$GITBOOK_SPACE_ID/git/import"
-          echo
+          echo "GitBook accepted the import request for $GITHUB_SHA; the import runs asynchronously. Check the space's revision history in GitBook for the result."
