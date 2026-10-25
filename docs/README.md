@@ -36,7 +36,7 @@ of a second copy of the same math.
 * [Lending economics](lending-economics.md) — what a lender is exposed to, where a loss lands, and how the oracle
   and interest rate are constructed.
 * [Risks](risks.md) — what can go wrong and who can act: every admin and governance lever that affects a pool.
-* [Official markets](official-markets.md) — the official mainnet markets, and the addresses to trust.
+* [Official markets](official-markets.md) — which markets are official, and the addresses to trust.
 * [Changes from Blend v2](changes-from-blend-v2.md) — a stock-versus-Precept table, with a permalink to the code on
   both sides of every row.
 * [Security and audits](security.md) — the Guardian review, the upstream audits, how to reproduce a release build,

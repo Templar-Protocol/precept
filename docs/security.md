@@ -48,6 +48,10 @@ git clone https://github.com/Templar-Protocol/precept.git
 cd precept
 git checkout v0.1.1
 make build
+mkdir -p .bin
+printf '#!/usr/bin/env bash\nexec "$@"\n' > .bin/pool-adapter-env
+chmod +x .bin/pool-adapter-env
+export PATH="$PWD/.bin:$PATH"
 cd pool-oracle-adapter && just preflight && just optimize
 ```
 
@@ -57,8 +61,8 @@ CLI 28.1.0 and Rust 1.98.0, and `just optimize` does not run it, so skipping it 
 different toolchain whose checksum will not match. The adapter's optimized file is written to
 `pool-oracle-adapter/target/wasm32v1-none/release-soroban-checked/pool_oracle_adapter.optimized.wasm`; rename it to
 `pool_oracle_adapter.wasm` before hashing, as the release workflow does, and compare all four files against the
-release's `SHA256SUMS`. The `just` recipes run through a `pool-adapter-env` wrapper that must be on `PATH`; in CI it is
-a `exec "$@"` shim created by the release workflow
+release's `SHA256SUMS`. The `just` recipes run through a `pool-adapter-env` wrapper that must be on `PATH`; the four lines
+above create it locally as the same `exec "$@"` shim CI uses, and in CI it is created by the release workflow
 ([.github/workflows/release.yml](https://github.com/Templar-Protocol/precept/blob/v0.1.1/.github/workflows/release.yml#L87-L92)).
 That workflow rebuilds the optimized WASMs from the tagged source and fails if any rebuilt file's checksum differs from
 the `SHA256SUMS` attached to the release.

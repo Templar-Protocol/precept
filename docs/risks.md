@@ -75,8 +75,11 @@ any failure traps with `InvalidPrice`, and a missing price traps rather than ret
 when a reserve is actually used by an operation, so a reserve can be configured with a feed that has never been
 exercised
 ([pool/src/pool/health_factor.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/health_factor.rs#L35-L42)).
-When a price is refused, lending and borrowing for that market stop; a lender who owes nothing in the reserve they are
-withdrawing from can still exit, because a plain withdrawal reads no price unless the withdrawer has debt in that reserve.
+When a price is refused, what stops is the work that loads a price: borrowing, any action that health-checks an account
+with debt, and the liquidation and write-off paths that value collateral. Plain supply reads no price and keeps running
+([pool/src/pool/actions.rs:337-354](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/actions.rs#L337-L354));
+supplying collateral loads one only in the new-reserve case described above, and a lender who owes nothing can still
+exit, because a plain withdrawal reads no price unless the withdrawer has debt in that reserve.
 
 Precept markets price through the pool-oracle adapter in this repository, which reads a Templar proxy oracle
 ([pool-oracle-adapter/src/lib.rs](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool-oracle-adapter/src/lib.rs#L51-L134)).

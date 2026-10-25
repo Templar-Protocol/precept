@@ -11,9 +11,10 @@ anyone can liquidate them by paying off their debt in exchange for the collatera
 If the collateral runs out before the debt is paid, the gap is taken from the lenders of that
 reserve, pro rata, in the same transaction. There is no insurance fund; the "backstop" is
 activation plumbing with no value. Prices come from external oracle networks through Templar's
-proxy; liquidators are external firms. When prices go stale, liquidations and loss recognition stop; a lender with no
-debt in the reserve can still make an ordinary withdrawal, because a plain withdrawal reads no price — any action that
-needs a health check does not.
+proxy; liquidators are external firms. When prices go stale, every action that has to load a price stops, which is where
+liquidations and loss recognition stall; actions that read no price keep working — a partial fill that leaves the filler
+with no debt, a write-off where no collateral is left to value, and an ordinary withdrawal by a lender who owes nothing
+in that reserve. Section 6 gives the table of which actions load a price.
 
 ## 1. Reserves, lenders, borrowers
 
@@ -233,9 +234,9 @@ A stale price only affects positions that hold that asset, but for those positio
 | Withdraw ordinary deposit | No, unless the lender also has debt in that reserve |
 | Withdraw collateral, borrow | Yes, if the account has any debt |
 | Create a liquidation auction | **Yes** |
-| Partial fill of an existing auction | No, as long as the filler ends with no debt |
+| Partial fill of an existing auction | No, as long as the filler ends with no debt ([pool/src/pool/submit.rs:214-218](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/submit.rs#L214-L218)) |
 | The **full fill** that completes the lot (it runs the write-off itself) | **Yes** while the borrower still holds collateral to value; a partial fill does not |
-| `bad_debt(user)` | Yes, unless the borrower has no collateral left to value |
+| `bad_debt(user)` | Yes, unless the borrower has no collateral left to value ([pool/src/pool/bad_debt.rs:63-74](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/pool/src/pool/bad_debt.rs#L63-L74)) |
 | Delete a stale auction | No |
 
 So a stale oracle freezes liquidations and loss recognition while leaving ordinary withdrawals by
