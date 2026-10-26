@@ -89,8 +89,11 @@ Notes for contributors:
 
 ## License
 
-The Blend-derived contracts are licensed under AGPL-3.0 — see [LICENSE](LICENSE). The `pool-oracle-adapter` crate is
-licensed under MIT — see [pool-oracle-adapter/LICENSE](pool-oracle-adapter/LICENSE).
+Precept is licensed under the Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). It is a fork of
+[Blend v2](https://github.com/blend-capital/blend-contracts-v2), which is MIT-licensed; Blend's notice is kept in
+[LICENSE-BLEND](LICENSE-BLEND). The `pool-oracle-adapter` crate is licensed under MIT — see
+[pool-oracle-adapter/LICENSE](pool-oracle-adapter/LICENSE). The prebuilt `comet.wasm` used by the tests is a
+third-party binary under its own license (AGPL-3.0); see [NOTICE](NOTICE).
 
 ## Security
 

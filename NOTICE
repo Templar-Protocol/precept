@@ -1,0 +1,19 @@
+Precept
+Copyright 2026 Templar Protocol
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE),
+except where a file or directory states otherwise.
+
+This product is a fork of Blend v2
+(https://github.com/blend-capital/blend-contracts-v2), Copyright (c) 2026 Blend.
+Blend v2 is licensed under the MIT License, as relicensed from AGPL-3.0 in
+blend-capital/blend-contracts-v2@f0331f178484f55e7654e8e35707e39f1eecf042.
+Blend's copyright and permission notice is reproduced in LICENSE-BLEND.
+
+Separately licensed parts:
+
+- pool-oracle-adapter/ is licensed under the MIT License
+  (see pool-oracle-adapter/LICENSE).
+- comet.wasm is a prebuilt binary of the Comet contracts
+  (https://github.com/CometDEX/comet-contracts-v1), licensed under AGPL-3.0.
+  It is used only by the test suites and is not covered by LICENSE.
