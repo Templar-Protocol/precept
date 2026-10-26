@@ -60,6 +60,7 @@
     ]
   },
   "notes": [
+    "NOT LIVE: do not deposit into, borrow from or loop against this pool until its contracts appear in mainnet.jsonl and the launch is announced.",
     "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
     "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a pool_oracle_adapter over a Templar proxy runtime.",
     "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",

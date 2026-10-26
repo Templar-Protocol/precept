@@ -106,6 +106,10 @@ repins a record) and `retire` when it replaces a deployment.
 
 ## Configs
 
+**These pools are not live. Do not deposit into, borrow from or loop against any
+pool described here until its contracts appear in `mainnet.jsonl` and the launch
+is announced.**
+
 `configs/<name>.json` holds a pool's launch parameters before it is deployed:
 the `PoolFactory.deploy` arguments under `pool`, each reserve's
 `queue_set_reserve` `ReserveConfig` under `reserves` (in index order), and the
