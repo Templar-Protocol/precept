@@ -1,0 +1,94 @@
+name: docs
+# GitBook renders docs/ from this public repo through its Git import API.
+# GitBook has no write access to this repo (no GitHub App is installed); this
+# workflow pushes the import request instead. The import uses force: true, so
+# it overwrites any edits made in the GitBook UI. Change the docs by PR.
+# The API returns once the import has started, so a green run means GitBook
+# accepted the request, not that the import finished; check the GitBook
+# revision history after the first runs.
+#
+# One-time setup: create the GitBook space and an API token, then create a
+# GitHub environment named `gitbook` limited to the main branch, holding the
+# secret GITBOOK_TOKEN and the variable GITBOOK_SPACE_ID. Run the first import
+# by hand with workflow_dispatch and standalone=true, which creates a GitBook
+# revision without replacing the published content.
+
+on:
+  pull_request:
+    paths:
+      - docs/**
+      - .gitbook.yaml
+      - scripts/check_docs.py
+      - scripts/test_check_docs.py
+      - .github/workflows/docs.yml
+  push:
+    branches:
+      - main
+    paths:
+      - docs/**
+      - .gitbook.yaml
+  workflow_dispatch:
+    inputs:
+      standalone:
+        description: Create a GitBook revision without replacing the published content
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  structure:
+    runs-on:
+      - ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Unit tests
+        run: python3 -m unittest discover -s scripts -p 'test_check_docs.py' -v
+      - name: Docs structure check
+        run: python3 scripts/check_docs.py
+
+  import:
+    needs: structure
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on:
+      - ubuntu-latest
+    environment: gitbook
+    concurrency:
+      group: gitbook-import
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Request GitBook import
+        env:
+          GITBOOK_TOKEN: ${{ secrets.GITBOOK_TOKEN }}
+          GITBOOK_SPACE_ID: ${{ vars.GITBOOK_SPACE_ID }}
+          STANDALONE: ${{ inputs.standalone || false }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GITBOOK_TOKEN" ]; then
+            echo "::error::secret GITBOOK_TOKEN is empty (set it in the gitbook environment)"
+            exit 1
+          fi
+          if [ -z "$GITBOOK_SPACE_ID" ]; then
+            echo "::error::variable GITBOOK_SPACE_ID is empty (set it in the gitbook environment)"
+            exit 1
+          fi
+          repo=https://github.com/Templar-Protocol/precept
+          body=$(jq -n \
+            --arg url "$repo.git" \
+            --arg tree "$repo/blob/$GITHUB_SHA/" \
+            --arg commit "$repo/commit/$GITHUB_SHA" \
+            --arg ts "$(git log -1 --format=%cI)" \
+            --argjson standalone "${STANDALONE:-false}" \
+            '{url: $url, ref: "refs/heads/main", repoTreeURL: $tree, repoCommitURL: $commit, timestamp: $ts, force: true, standalone: $standalone}')
+          curl -fsS --connect-timeout 30 --max-time 120 -X POST \
+            -H "Authorization: Bearer $GITBOOK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            "https://api.gitbook.com/v1/spaces/$GITBOOK_SPACE_ID/git/import"
+          echo "GitBook accepted the import request for $GITHUB_SHA; the import runs asynchronously. Check the space's revision history in GitBook for the result."
