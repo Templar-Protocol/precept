@@ -55,6 +55,7 @@
   "target_status": 0,
   "notes": [
     "NOT LIVE: do not deposit into, borrow from or loop against this pool until its contracts appear in mainnet.jsonl and the launch is announced.",
+    "oracle: Pyth Lazer (mainnet verifier, feeds USDC 7 / XLM 23) and the RedStone multi-feed SEP-40 wrapper, base USD; one source suffices (RedStone pushes every 12 h or on a 0.1-0.2% move, so within 300 s it usually counts only Lazer). This pool deploys the shared Templar oracle runtime.",
     "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
     "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a pool_oracle_adapter over the Templar proxy runtime.",
     "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",
@@ -63,5 +64,44 @@
     "supply_cap is i128::MAX: no on-chain cap, and it can never be lowered (reserve configs freeze after setup). The pilot limit is enforced in the app only.",
     "On chain a borrow only needs health factor >= 1.00001, so the 75% max-borrow LTV is app-enforced; a direct contract call can borrow up to the 80% liquidation LTV. Liquidation incentive tops out at (1 - c_factor) / 2 = 10%.",
     "set_status 0 checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital."
-  ]
+  ],
+  "oracle": {
+    "lazer_verifier": "CACZ3GBAKUPIAFRILUFO27J5RUH5GJ2VSJ46LP6GJYSKGDRTQ5MS3HCH",
+    "assets": {
+      "usdc": {
+        "min_sources": 1,
+        "max_age_secs": 300,
+        "sources": [
+          {
+            "kind": "lazer",
+            "feed_id": 7
+          },
+          {
+            "kind": "sep40",
+            "contract": "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
+            "asset": {
+              "Stellar": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+            }
+          }
+        ]
+      },
+      "xlm": {
+        "min_sources": 1,
+        "max_age_secs": 300,
+        "sources": [
+          {
+            "kind": "lazer",
+            "feed_id": 23
+          },
+          {
+            "kind": "sep40",
+            "contract": "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
+            "asset": {
+              "Stellar": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"
+            }
+          }
+        ]
+      }
+    }
+  }
 }

@@ -55,6 +55,7 @@
   "target_status": 0,
   "notes": [
     "NOT LIVE: do not deposit into, borrow from or loop against this pool until its contracts appear in mainnet.jsonl and the launch is announced.",
+    "oracle: reuses the Templar runtime deployed with xlm-usdc (set oracle.runtime to its id before deploying; USDC is already registered there). deJAAA is priced by the RedStone wrapper alone (12 h heartbeat or 0.25% move), hence the 13 h max age.",
     "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
     "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a dedicated pool_oracle_adapter.",
     "Activate (set_status 0) only once the oracle has its full source set. set_status 0 also checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital.",
@@ -63,5 +64,22 @@
     "dejaaa is a custom Soroban token (Centrifuge wrapped AAA CLO, not a SAC); 18 decimals per its on-chain decimals(). Collateral only; r_base 1000 is the contract minimum. min_position = 1 deJAAA.",
     "supply_cap is i128::MAX: no on-chain cap, and it can never be lowered. The pilot limit is enforced in the app only.",
     "On chain a borrow only needs health factor >= 1.00001, so the 93.5% max-borrow LTV is app-enforced; a direct contract call can borrow up to the 95% liquidation LTV. Liquidation incentive tops out at (1 - c_factor) / 2 = 2.5%."
-  ]
+  ],
+  "oracle": {
+    "assets": {
+      "dejaaa": {
+        "min_sources": 1,
+        "max_age_secs": 46800,
+        "sources": [
+          {
+            "kind": "sep40",
+            "contract": "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
+            "asset": {
+              "Stellar": "CC64WBDGS6QQP22QTTIACYIXT3WF7BBQEYOQPLTP7GTKYY7PZ74QYGSL"
+            }
+          }
+        ]
+      }
+    }
+  }
 }

@@ -113,8 +113,8 @@ is announced.**
 `configs/<name>.json` holds a pool's launch parameters before it is deployed:
 the `PoolFactory.deploy` arguments under `pool`, each reserve's
 `queue_set_reserve` `ReserveConfig` under `reserves` (in index order), and the
-`set_status` value to activate with, plus free-text `notes` and, once known,
-`oracle_sources` (per-reserve price feeds). Field names and units are the
+`set_status` value to activate with, plus free-text `notes` and `oracle`: per
+reserve, the price sources, quorum (`min_sources`) and freshness (`max_age_secs`). Field names and units are the
 contract's own; `i128` values are decimal strings, as the `stellar` CLI takes
 them. A `null` is a value not yet decided. Configs are inputs, not records: once the
 pool is live its contracts go in `<network>.jsonl` as usual. `check` does not

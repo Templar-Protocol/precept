@@ -53,22 +53,51 @@
     }
   ],
   "target_status": 0,
-  "oracle_sources": {
-    "earnusdc": [
-      "RedStone earnUSDC_FUNDAMENTAL/USD (stellarMultiFeed): https://app.redstone.finance/push-feeds/earnUSDC_FUNDAMENTAL%2FUSD/stellarMultiFeed",
-      "RedStone earnUSDC_FUNDAMENTAL, earnUSDC/USDC (stellarMultiFeed): https://app.redstone.finance/push-feeds/earnUSDC_FUNDAMENTAL/stellarMultiFeed"
-    ]
-  },
   "notes": [
     "NOT LIVE: do not deposit into, borrow from or loop against this pool until its contracts appear in mainnet.jsonl and the launch is announced.",
+    "oracle: its own runtime. USDC from Pyth Lazer (feed 7) and RedStone; earnUSDC from the RedStone wrapper alone (earnUSDC_FUNDAMENTAL/USD, 12 h heartbeat or 0.5% move), hence the 13 h max age.",
     "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
     "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a pool_oracle_adapter over a Templar proxy runtime.",
     "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",
     "usdc IRM at ir_mod = 1: 4% at U=0, 8% at 85%, 10% at 90%, 12% at 95%, 112% at 100%. reactivity 100 moves ir_mod (bounded 0.1x-10x) toward target: below 85% the curve decays to as little as a tenth, above it scales up to 10x below 95% and adds up to 9x of (r_base + r_one + r_two) above.",
     "Borrows stop at max_util 90%; withdrawals may push U to just under 100%, which is where r_three applies.",
     "earnusdc is a custom Soroban token (unverified wasm 4b3d9f6b...), 13 decimals per its on-chain decimals(). Collateral only; r_base 1000 is the contract minimum. min_position = 10 earnUSDC. Liquidation incentive tops out at (1 - c_factor) / 2 = 5%.",
-    "Oracle: the proxy runtime requires 3-16 sources per asset, all against one base, with min_sources >= 3. The RedStone feeds above are one source; earnUSDC (and USDC) each need at least two more before activation.",
     "Immutable after setup: update_pool is disabled and reserves only accept disabling, so caps, IRM, factors, max_positions and min_collateral are permanent.",
     "set_status 0 checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital."
-  ]
+  ],
+  "oracle": {
+    "lazer_verifier": "CACZ3GBAKUPIAFRILUFO27J5RUH5GJ2VSJ46LP6GJYSKGDRTQ5MS3HCH",
+    "assets": {
+      "usdc": {
+        "min_sources": 1,
+        "max_age_secs": 300,
+        "sources": [
+          {
+            "kind": "lazer",
+            "feed_id": 7
+          },
+          {
+            "kind": "sep40",
+            "contract": "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
+            "asset": {
+              "Stellar": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+            }
+          }
+        ]
+      },
+      "earnusdc": {
+        "min_sources": 1,
+        "max_age_secs": 46800,
+        "sources": [
+          {
+            "kind": "sep40",
+            "contract": "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
+            "asset": {
+              "Stellar": "CCL3WITWFFXIHV2I52ECV5DPIEOFSTU3PBPR53ILPLF2IP5KHECXRUTY"
+            }
+          }
+        ]
+      }
+    }
+  }
 }
