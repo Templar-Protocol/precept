@@ -1,6 +1,6 @@
 # Certora Sunbeam runbook
 
-[VERIFICATION.md](../../VERIFICATION.md) is the authoritative report for verification
+[VERIFICATION.md](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/VERIFICATION.md) is the authoritative report for verification
 status, claim scopes, assumptions, limitations and evidence provenance. This guide
 covers tooling, configuration and reading or preserving Certora artifacts; it
 does not extend any claim in that report.
@@ -29,7 +29,7 @@ artifact. Consult the central report before transferring a verdict between them.
 ## Local prerequisites and build
 
 Use the repository Rust/Wasm toolchain and Stellar CLI described in the
-[shared preparation instructions](../../VERIFICATION.md#reproducing-this).
+[shared preparation instructions](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/VERIFICATION.md#reproducing-this).
 
 Certora has a separate, existing **pool-local** Justfile. Install `just` before
 using its build callback. From `pool/`, `certora_build.py` invokes `just build`:
@@ -73,7 +73,7 @@ the working directory. Other configurations are `user_rules.conf`,
 `health_unresolved.conf`, `utilization.conf`, `supply_cap.conf`,
 `supply_cap_collateral.conf` and `supply_credit.conf`. A configuration's existence
 does not imply a completed or successful proof; consult
-[VERIFICATION.md](../../VERIFICATION.md) before selecting it.
+[VERIFICATION.md](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/VERIFICATION.md) before selecting it.
 
 ## Reading verdicts and preserving evidence
 
@@ -90,9 +90,9 @@ does not imply a completed or successful proof; consult
   rewrite an old result to represent a later source tree. Keep source commit,
   lockfile, configuration, CLI/prover identity and artifact hashes with any new
   evidence so its inputs and dependencies remain identifiable.
-- The [archive index](../../verification/certora/README.md) locates historical runs;
+- The [archive index](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/verification/certora/README.md) locates historical runs;
   its historical narrative is not the current status authority. Read archived
-  JSON together with [VERIFICATION.md](../../VERIFICATION.md), not as an independent
+  JSON together with [VERIFICATION.md](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/VERIFICATION.md), not as an independent
   certification of the current tree.
 - Authorized monitoring may need the `anonymousKey` retained under
   `pool/.certora_internal/`. Keep credentials and internal submission data out of
