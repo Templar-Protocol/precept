@@ -1,0 +1,66 @@
+{
+  "name": "xlm-usdc",
+  "network": "mainnet",
+  "proposed_by": "Templar (Precept launch pool, 2026-10-26)",
+  "pool": {
+    "admin": "GD4S5HCG5VAOQN33L6MXRISJAWWCOOKO3TBGTUJ5P2OSZONNK5Q5RHKY",
+    "name": "Precept - XLM/USDC",
+    "oracle": null,
+    "backstop_take_rate": 0,
+    "max_positions": 4,
+    "min_collateral": "10000000000"
+  },
+  "reserves": [
+    {
+      "asset": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+      "label": "usdc",
+      "config": {
+        "index": 0,
+        "decimals": 7,
+        "c_factor": 0,
+        "l_factor": 10000000,
+        "util": 9000000,
+        "max_util": 9900000,
+        "r_base": 1000,
+        "r_one": 799000,
+        "r_two": 1200000,
+        "r_three": 1200000,
+        "reactivity": 0,
+        "supply_cap": "170141183460469231731687303715884105727",
+        "min_position": "10000000",
+        "enabled": true
+      }
+    },
+    {
+      "asset": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA",
+      "label": "xlm",
+      "config": {
+        "index": 1,
+        "decimals": 7,
+        "c_factor": 8000000,
+        "l_factor": 0,
+        "util": 8000000,
+        "max_util": 9000000,
+        "r_base": 1000,
+        "r_one": 0,
+        "r_two": 0,
+        "r_three": 0,
+        "reactivity": 0,
+        "supply_cap": "170141183460469231731687303715884105727",
+        "min_position": "500000000",
+        "enabled": true
+      }
+    }
+  ],
+  "target_status": 0,
+  "notes": [
+    "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
+    "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a pool_oracle_adapter over the Templar proxy runtime.",
+    "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",
+    "max_positions 4 covers every pairing of the two reserves, including a liquidation auction's lot + bid.",
+    "reserves: USDC is Circle's SAC, XLM the native SAC; both 7 decimals. usdc IRM (fixed, reactivity 0): 0.01% at U=0, 8% at 90%, 20% at 95%, 32% at 100%. xlm is collateral only; r_base 1000 is the contract minimum.",
+    "supply_cap is i128::MAX: no on-chain cap, and it can never be lowered (reserve configs freeze after setup). The pilot limit is enforced in the app only.",
+    "On chain a borrow only needs health factor >= 1.00001, so the 75% max-borrow LTV is app-enforced; a direct contract call can borrow up to the 80% liquidation LTV. Liquidation incentive tops out at (1 - c_factor) / 2 = 10%.",
+    "set_status 0 checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital."
+  ]
+}

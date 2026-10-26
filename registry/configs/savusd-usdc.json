@@ -1,0 +1,65 @@
+{
+  "name": "savusd-usdc",
+  "network": "mainnet",
+  "proposed_by": "Gami Labs (savUSD/USDC launch proposal, 2026-10-26)",
+  "pool": {
+    "admin": "GD4S5HCG5VAOQN33L6MXRISJAWWCOOKO3TBGTUJ5P2OSZONNK5Q5RHKY",
+    "name": "Gami Labs Pool - savUSD/USDC",
+    "oracle": null,
+    "backstop_take_rate": 0,
+    "max_positions": 16,
+    "min_collateral": "100000000000"
+  },
+  "reserves": [
+    {
+      "asset": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+      "label": "usdc",
+      "config": {
+        "index": 0,
+        "decimals": 7,
+        "c_factor": 0,
+        "l_factor": 10000000,
+        "util": 9000000,
+        "max_util": 9200000,
+        "r_base": 200000,
+        "r_one": 450000,
+        "r_two": 925000,
+        "r_three": 925000,
+        "reactivity": 50,
+        "supply_cap": "200000000000000",
+        "min_position": "10000000",
+        "enabled": true
+      }
+    },
+    {
+      "asset": "CBW5332J2RUTSOIUESSNBNLESPEIEUG6G4LOQOAM6IP3ANORCMN5CPQB",
+      "label": "savusd",
+      "config": {
+        "index": 1,
+        "decimals": 7,
+        "c_factor": 8500000,
+        "l_factor": 0,
+        "util": 8000000,
+        "max_util": 9000000,
+        "r_base": 1000,
+        "r_one": 0,
+        "r_two": 0,
+        "r_three": 0,
+        "reactivity": 0,
+        "supply_cap": "250000000000000",
+        "min_position": "1000000000",
+        "enabled": true
+      }
+    }
+  ],
+  "target_status": 0,
+  "notes": [
+    "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
+    "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is the dedicated pool_oracle_adapter, deployed first.",
+    "min_collateral is in oracle base units; the pool only leaves setup with a 7-decimal oracle, so 100000000000 = 10,000 USD.",
+    "reserves: ReserveConfig arguments to queue_set_reserve, in index order. Both assets are classic-asset SACs with 7 decimals: USDC issuer GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN, savUSD issuer GBCSESJONU4FJGIRC4UTDHQFE43IL4U4I4HP5JKPKAJVNMQO76672MJJ.",
+    "usdc IRM at ir_mod = 1: 2% at U=0, 6.5% at 90%, 10.2% at 92%, 15.75% at 95%, 25% at 100%. savusd is collateral only (l_factor 0); r_base 1000 is the contract minimum.",
+    "Immutable after setup: update_pool is disabled and, once the pool leaves status 6, queue_set_reserve only accepts disabling a reserve. Caps, IRM, factors, max_positions and min_collateral are permanent.",
+    "set_status 0 checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital."
+  ]
+}

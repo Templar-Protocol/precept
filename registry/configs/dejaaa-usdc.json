@@ -1,0 +1,66 @@
+{
+  "name": "dejaaa-usdc",
+  "network": "mainnet",
+  "proposed_by": "Templar (Precept launch pool, 2026-10-26)",
+  "pool": {
+    "admin": "GD4S5HCG5VAOQN33L6MXRISJAWWCOOKO3TBGTUJ5P2OSZONNK5Q5RHKY",
+    "name": "Precept - deJAAA/USDC",
+    "oracle": null,
+    "backstop_take_rate": 0,
+    "max_positions": 4,
+    "min_collateral": "10000000000"
+  },
+  "reserves": [
+    {
+      "asset": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+      "label": "usdc",
+      "config": {
+        "index": 0,
+        "decimals": 7,
+        "c_factor": 0,
+        "l_factor": 10000000,
+        "util": 9000000,
+        "max_util": 9900000,
+        "r_base": 330000,
+        "r_one": 0,
+        "r_two": 1000000,
+        "r_three": 1000000,
+        "reactivity": 0,
+        "supply_cap": "170141183460469231731687303715884105727",
+        "min_position": "10000000",
+        "enabled": true
+      }
+    },
+    {
+      "asset": "CC64WBDGS6QQP22QTTIACYIXT3WF7BBQEYOQPLTP7GTKYY7PZ74QYGSL",
+      "label": "dejaaa",
+      "config": {
+        "index": 1,
+        "decimals": 18,
+        "c_factor": 9500000,
+        "l_factor": 0,
+        "util": 8000000,
+        "max_util": 9000000,
+        "r_base": 1000,
+        "r_one": 0,
+        "r_two": 0,
+        "r_three": 0,
+        "reactivity": 0,
+        "supply_cap": "170141183460469231731687303715884105727",
+        "min_position": "1000000000000000000",
+        "enabled": true
+      }
+    }
+  ],
+  "target_status": 0,
+  "notes": [
+    "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
+    "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a dedicated pool_oracle_adapter.",
+    "Activate (set_status 0) only once the oracle has its full source set. set_status 0 also checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital.",
+    "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",
+    "usdc IRM (fixed, reactivity 0): flat 3.3% up to U=90%, 13.3% at 95%, 23.3% at 100%. The kink above 90% is there because reserve configs freeze after setup.",
+    "dejaaa is a custom Soroban token (Centrifuge wrapped AAA CLO, not a SAC); 18 decimals per its on-chain decimals(). Collateral only; r_base 1000 is the contract minimum. min_position = 1 deJAAA.",
+    "supply_cap is i128::MAX: no on-chain cap, and it can never be lowered. The pilot limit is enforced in the app only.",
+    "On chain a borrow only needs health factor >= 1.00001, so the 93.5% max-borrow LTV is app-enforced; a direct contract call can borrow up to the 95% liquidation LTV. Liquidation incentive tops out at (1 - c_factor) / 2 = 2.5%."
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "name": "earnusdc-usdc",
+  "network": "mainnet",
+  "proposed_by": "Gami Labs (earnUSDC/USDC launch proposal, 2026-10-26)",
+  "pool": {
+    "admin": "GD4S5HCG5VAOQN33L6MXRISJAWWCOOKO3TBGTUJ5P2OSZONNK5Q5RHKY",
+    "name": "Gami Labs Pool - earnUSDC/USDC",
+    "oracle": null,
+    "backstop_take_rate": 0,
+    "max_positions": 10,
+    "min_collateral": "10000000000"
+  },
+  "reserves": [
+    {
+      "asset": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+      "label": "usdc",
+      "config": {
+        "index": 0,
+        "decimals": 7,
+        "c_factor": 0,
+        "l_factor": 10000000,
+        "util": 8500000,
+        "max_util": 9000000,
+        "r_base": 400000,
+        "r_one": 400000,
+        "r_two": 400000,
+        "r_three": 10000000,
+        "reactivity": 100,
+        "supply_cap": "200000000000000",
+        "min_position": "10000000",
+        "enabled": true
+      }
+    },
+    {
+      "asset": "CCL3WITWFFXIHV2I52ECV5DPIEOFSTU3PBPR53ILPLF2IP5KHECXRUTY",
+      "label": "earnusdc",
+      "config": {
+        "index": 1,
+        "decimals": 13,
+        "c_factor": 9000000,
+        "l_factor": 0,
+        "util": 8000000,
+        "max_util": 9000000,
+        "r_base": 1000,
+        "r_one": 0,
+        "r_two": 0,
+        "r_three": 0,
+        "reactivity": 0,
+        "supply_cap": "250000000000000000000",
+        "min_position": "100000000000000",
+        "enabled": true
+      }
+    }
+  ],
+  "target_status": 0,
+  "oracle_sources": {
+    "earnusdc": [
+      "RedStone earnUSDC_FUNDAMENTAL/USD (stellarMultiFeed): https://app.redstone.finance/push-feeds/earnUSDC_FUNDAMENTAL%2FUSD/stellarMultiFeed",
+      "RedStone earnUSDC_FUNDAMENTAL, earnUSDC/USDC (stellarMultiFeed): https://app.redstone.finance/push-feeds/earnUSDC_FUNDAMENTAL/stellarMultiFeed"
+    ]
+  },
+  "notes": [
+    "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
+    "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a pool_oracle_adapter over a Templar proxy runtime.",
+    "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",
+    "usdc IRM at ir_mod = 1: 4% at U=0, 8% at 85%, 10% at 90%, 12% at 95%, 112% at 100%. reactivity 100 moves ir_mod (bounded 0.1x-10x) toward target: below 85% the curve decays to as little as a tenth, above it scales up to 10x below 95% and adds up to 9x of (r_base + r_one + r_two) above.",
+    "Borrows stop at max_util 90%; withdrawals may push U to just under 100%, which is where r_three applies.",
+    "earnusdc is a custom Soroban token (unverified wasm 4b3d9f6b...), 13 decimals per its on-chain decimals(). Collateral only; r_base 1000 is the contract minimum. min_position = 10 earnUSDC. Liquidation incentive tops out at (1 - c_factor) / 2 = 5%.",
+    "Oracle: the proxy runtime requires 3-16 sources per asset, all against one base, with min_sources >= 3. The RedStone feeds above are one source; earnUSDC (and USDC) each need at least two more before activation.",
+    "Immutable after setup: update_pool is disabled and reserves only accept disabling, so caps, IRM, factors, max_positions and min_collateral are permanent.",
+    "set_status 0 checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital."
+  ]
+}
