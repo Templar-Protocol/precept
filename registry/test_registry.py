@@ -340,11 +340,13 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(sizes, [100, 100, 50])
         self.assertEqual(set(found), {"0", "100"})
 
-    def test_verify_mainnet_needs_rpc(self):
+    def test_verify_mainnet_uses_public_rpc_unless_overridden(self):
         (self.dir / "mainnet.jsonl").write_text(registry.dump(wasm(network="mainnet")) + "\n")
-        code, out = self.run_cli("verify", "--network", "mainnet")
-        self.assertEqual(code, 1)
-        self.assertIn("pass --rpc URL", out)
+        urls = []
+        registry.fetch = lambda url, keys: urls.append(url) or {k: "x" for k in keys}
+        self.run_cli("verify", "--network", "mainnet")
+        self.run_cli("verify", "--network", "mainnet", "--rpc", "http://own")
+        self.assertEqual(urls, [registry.NETWORKS["mainnet"], "http://own"])
 
     def test_verify_empty_is_noop(self):
         code, out = self.run_cli("verify", "--network", "testnet")
