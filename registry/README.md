@@ -104,6 +104,22 @@ code, the `wasm` record with `source` pointing at the release or commit it
 built from; it then calls `add` (with `--update` only when it intentionally
 repins a record) and `retire` when it replaces a deployment.
 
+## Configs
+
+**These pools are not live. Do not deposit into, borrow from or loop against any
+pool described here until its contracts appear in `mainnet.jsonl` and the launch
+is announced.**
+
+`configs/<name>.json` holds a pool's launch parameters before it is deployed:
+the `PoolFactory.deploy` arguments under `pool`, each reserve's
+`queue_set_reserve` `ReserveConfig` under `reserves` (in index order), and the
+`set_status` value to activate with, plus free-text `notes` and `oracle`: per
+reserve, the price sources, quorum (`min_sources`) and freshness (`max_age_secs`). Field names and units are the
+contract's own; `i128` values are decimal strings, as the `stellar` CLI takes
+them. A `null` is a value not yet decided. Configs are inputs, not records: once the
+pool is live its contracts go in `<network>.jsonl` as usual. `check` does not
+read this directory.
+
 ## Tests
 
     python3 -m unittest discover -s registry
