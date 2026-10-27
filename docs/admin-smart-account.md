@@ -92,12 +92,19 @@ lives in the account. The account's single default context rule (named
 
 ## Hand-off status
 
-**In progress.** The hand-off from the deploy key to the account has started but is not complete:
+**Complete (2026-10-27).** The deploy key `GD4S5HCG…RHKY` holds no authority; read back from chain:
 
-- the hot (deploy) key has proposed the account as admin of the pools;
-- the hot key has started the Lazer ownership transfer to the account;
-- the hot key has granted the account the governance Admin role.
+| Item | Holder | Accepting tx |
+|---|---|---|
+| xlm-usdc pool `CAILFZ2M…7DPF` admin | account | `911ffe19…b4b9` (`accept_admin`) |
+| dejaaa-usdc pool `CBTC5WFK…QULS` admin | account | `4ebd8428…b42c` (`accept_admin`) |
+| Lazer source `CDXOHZDL…E5IB` owner | account | `4eac8afa…344a` (`accept_ownership`) |
+| Governance `CD6AR7CH…QTI4` Admin | account only | grant by the deploy key; its own Admin revoked by the account, `53ff857d…84ed` (`execute_proposal(4)`) |
+| Comet controllers `CBGHPG24…TKPM`, `CC7KUL3L…UTBW` | account | one-step `set_controller` by the deploy key, `85e35c2c…`, `31b37b40…` |
+| Proxy runtime `CBTCHY4L…GI4X` owner | governance (by design) | — |
 
-The account still has to accept the pending admin proposals. Until it does, the
-pools remain administered by the deploy key, and the registry's pool rows still
-record the deploy account in their `admin` field.
+Governance roles `ManualTripper`, `CircuitBreakerOperator` and `ProxyConfigurationManager`
+are unassigned, so every governance action needs two of the three signers.
+
+Both pools were then activated by the account (`set_status(0)`, Admin Active):
+xlm-usdc `708abf30…5390`, dejaaa-usdc `d4f517ef…2484`.
