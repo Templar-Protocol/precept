@@ -84,7 +84,7 @@ from anywhere — it locates the registry files next to itself, not by cwd):
     python3 registry/registry.py add    --network testnet records.jsonl --update
     python3 registry/registry.py retire --network testnet --deployment my-run-20261027
     python3 registry/registry.py check
-    python3 registry/registry.py verify --network testnet [--rpc URL]
+    python3 registry/registry.py verify --network testnet|mainnet [--rpc URL]
 
 `add` validates each record, merges by unique key (identical record = no-op;
 a conflicting one is an error unless `--update`) and rewrites the file in
@@ -93,7 +93,8 @@ canonical form. `retire` sets `status: retired` on a deployment's contracts.
 and order, uniqueness, refs and wasm-hash resolution, statuses — and exits
 non-zero with one precise message per problem. `verify` is read-only: it
 queries `getLedgerEntries` on the network's Soroban JSON-RPC (default: the
-public testnet RPC; mainnet has no public RPC, pass `--rpc`) and confirms
+public testnet RPC, or the keyless public `mainnet.sorobanrpc.com`; `--rpc`
+overrides either) and confirms
 each active contract's executable hash and that every `wasm` hash is live
 code on that network. It is deliberately not a CLI wrapper: same ledger
 entries as `stellar contract info`, no dependency to install.

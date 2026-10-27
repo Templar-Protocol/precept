@@ -42,8 +42,8 @@ jobs:
     runs-on:
       - ubuntu-latest
     env:
-      # Set as a repository variable once mainnet.jsonl has entries; verify
-      # then fails with a clear message if it is missing.
+      # Optional repository variable overriding registry.py's public mainnet
+      # RPC default.
       MAINNET_RPC: ${{ vars.MAINNET_RPC }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
