@@ -79,7 +79,28 @@
             }
           }
         ]
+      },
+      "usdc": {
+        "min_sources": 1,
+        "max_age_secs": 3600,
+        "sources": [
+          {
+            "kind": "sep40",
+            "contract": "CDXOHZDLLF6AMQ5NLZQOWRSBQIJBFPC4KWQ6SOLKQSQOP2EYDQC4E5IB",
+            "asset": {
+              "Other": "7"
+            }
+          },
+          {
+            "kind": "sep40",
+            "contract": "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
+            "asset": {
+              "Stellar": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+            }
+          }
+        ]
       }
-    }
+    },
+    "runtime": "CBTCHY4LFA5K3SDCOSUCZWO6VNKL4M7WRVXSRCXGVJGEZTX4D3DGGI4X"
   }
 }
