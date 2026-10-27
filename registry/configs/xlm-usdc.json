@@ -55,7 +55,7 @@
   "target_status": 0,
   "notes": [
     "NOT LIVE: do not deposit into, borrow from or loop against this pool until its contracts appear in mainnet.jsonl and the launch is announced.",
-    "oracle: Pyth Lazer (mainnet verifier, feeds USDC 7 / XLM 23) and the RedStone multi-feed SEP-40 wrapper, base USD; one source suffices (RedStone pushes every 12 h or on a 0.1-0.2% move, so within 300 s it usually counts only Lazer). This pool deploys the shared Templar oracle runtime.",
+    "oracle: Pyth Lazer (mainnet verifier, feeds USDC 7 / XLM 23) and the RedStone multi-feed SEP-40 wrapper, base USD; one source suffices. Freshness window 1 h for both assets (a price older than 3600 s is not served): set to keep keeper cost down; it lives in the runtime's per-asset ProxyConfig and governance can change it later with SetProxy. This pool deploys the shared Templar oracle runtime.",
     "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
     "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a pool_oracle_adapter over the Templar proxy runtime.",
     "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",
@@ -70,7 +70,7 @@
     "assets": {
       "usdc": {
         "min_sources": 1,
-        "max_age_secs": 300,
+        "max_age_secs": 3600,
         "sources": [
           {
             "kind": "lazer",
@@ -87,7 +87,7 @@
       },
       "xlm": {
         "min_sources": 1,
-        "max_age_secs": 300,
+        "max_age_secs": 3600,
         "sources": [
           {
             "kind": "lazer",
