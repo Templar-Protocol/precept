@@ -152,7 +152,19 @@ class RegistryTest(unittest.TestCase):
         self.assertFalse((self.dir / "testnet.jsonl").read_text())
         code, out = self.run_cli("add", "--network", "testnet", self.input_file([contract(admin="G" + "A" * 55)]))
         self.assertEqual(code, 1)
-        self.assertIn("admin: not a valid account strkey", out)
+        self.assertIn("admin: not a valid account or contract strkey", out)
+
+    def test_admin_may_be_account_or_contract(self):
+        # A multisig smart account (C…) may administer a contract, not just a G… key.
+        smart = registry.strkey_encode("C", b"\x66" * 32)
+        self.seed(contract(admin=smart), factory(), wasm())
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 0, out)
+        broken = smart[:-1] + ("A" if smart[-1] != "A" else "B")
+        self.seed(contract(admin=broken), factory(), wasm())
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 1)
+        self.assertIn("admin: not a valid account or contract strkey", out)
 
     def input_file(self, recs):
         p = self.dir / "in.jsonl"

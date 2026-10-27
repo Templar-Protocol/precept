@@ -19,3 +19,4 @@
 ## Security
 
 * [Security and audits](security.md)
+* [Mainnet admin smart account](admin-smart-account.md)

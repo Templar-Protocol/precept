@@ -181,8 +181,8 @@ def validate_record(rec, network):
                 errs.append(f"refs.{k}: not a valid contract strkey: {v!r}")
     if "label" in rec and not _str(rec["label"]):
         errs.append("label: must be a non-empty string")
-    if "admin" in rec and not strkey_ok(rec["admin"], "G"):
-        errs.append(f"admin: not a valid account strkey: {rec['admin']!r}")
+    if "admin" in rec and not (strkey_ok(rec["admin"], "G") or strkey_ok(rec["admin"], "C")):
+        errs.append(f"admin: not a valid account or contract strkey: {rec['admin']!r}")
     if "assets" in rec:
         a = rec["assets"]
         if not (isinstance(a, list) and a and all(strkey_ok(x, "C") for x in a) and len(set(a)) == len(a)):
