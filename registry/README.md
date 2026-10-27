@@ -38,7 +38,7 @@ spacing is never required, just not wrong-casing hex or breaking sort.
 - `id` — contract strkey; `role` — what the contract is: `pool`, `backstop`,
   `pool_factory`, `pool_oracle_adapter`, `proxy_runtime`, `proxy_governance`,
   `lazer_source`, `price_source`, `oracle`, `token`, `comet`, `emitter`,
-  `faucet`.
+  `faucet`, `admin_smart_account`, `admin_policy`.
 - `deployment` — the stable name of the run that created the contract (its
   evidence run name). Contracts a later run reused keep the creating run's
   name; when the run that *created* them is retired but they still serve an
@@ -55,7 +55,8 @@ spacing is never required, just not wrong-casing hex or breaking sort.
   under external keys `verifier` and `token` (e.g. the Pyth Lazer verifier,
   third-party tokens), which may name contracts we did not deploy.
 - optional: `label` (free text, e.g. which token a token contract is),
-  `admin` (G… strkey), `assets` (pool reserve token contract ids).
+  `admin` (G… account or C… contract strkey, e.g. a multisig smart account),
+  `assets` (pool reserve token contract ids).
 
 ### `kind: "wasm"`
 
