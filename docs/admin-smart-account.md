@@ -5,7 +5,7 @@ holds authority and enforces 2-of-3 approval through a threshold policy
 contract. No single key can act as admin.
 
 This page records what is deployed and how it behaves. The machine-readable
-rows live in [`registry/mainnet.jsonl`](../registry/mainnet.jsonl); run
+rows live in `registry/mainnet.jsonl`; run
 `python3 registry/registry.py check` to validate them.
 
 ## Deployed ids
