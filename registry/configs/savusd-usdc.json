@@ -55,7 +55,7 @@
   "target_status": 0,
   "notes": [
     "NOT LIVE: do not deposit into, borrow from or loop against this pool until its contracts appear in mainnet.jsonl and the launch is announced.",
-    "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
+    "admin is a temporary operator key (the deployer must sign as admin); after setup every role hands over to Gami Labs' Fordefi accounts: pool admin GBC7HYZNLGNOICHXWENZFS4GFMWJ3Y5AK4WSBEJPW7J3PH4QWHYDV3NB via the pool's two-step propose_admin/accept_admin (also the Comet controller), and oracle admin GABFY537IALSI5OMJXHU5EXARA6LP5ZG6EBT63DH75KOXLEVGVJD72TV for this pool's own runtime (governance roles via SetRole, Lazer source ownership via transfer_ownership/accept_ownership). Both accounts must exist on mainnet before they can accept. The same two accounts administer earnusdc-usdc and savusd-usdc.",
     "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is the dedicated pool_oracle_adapter, deployed first.",
     "min_collateral is in oracle base units; the pool only leaves setup with a 7-decimal oracle, so 100000000000 = 10,000 USD.",
     "reserves: ReserveConfig arguments to queue_set_reserve, in index order. Both assets are classic-asset SACs with 7 decimals: USDC issuer GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN, savUSD issuer GBCSESJONU4FJGIRC4UTDHQFE43IL4U4I4HP5JKPKAJVNMQO76672MJJ.",
