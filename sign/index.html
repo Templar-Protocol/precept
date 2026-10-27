@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- GitHub Pages sends no headers, so the policy has to live here. `frame-ancestors` cannot be set
+     from a meta tag, which is the one protection this page cannot have. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src wss://relay.walletconnect.org; base-uri 'none'; form-action 'none'">
+<title>Sign an admin action</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; max-width: 46rem; margin: 2rem auto;
+         padding: 0 1rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  .guard { border: 2px solid #c0392b; border-radius: .5rem; padding: .9rem 1rem; margin: 1rem 0; }
+  .guard b { color: #c0392b; }
+  pre, code, textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { background: rgba(127,127,127,.12); padding: .8rem; border-radius: .4rem; overflow-x: auto;
+        white-space: pre-wrap; word-break: break-word; }
+  .payload { font-size: .92rem; }
+  button { font: inherit; padding: .55rem .9rem; margin: .3rem .4rem .3rem 0; border-radius: .45rem;
+           border: 1px solid #888; background: rgba(127,127,127,.08); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #status { margin-top: 1rem; font-weight: 600; }
+  .err { color: #c0392b; }
+  .ok { color: #1e8449; }
+  textarea { width: 100%; min-height: 5.5rem; }
+  .muted { opacity: .75; font-size: .92rem; }
+  #qr canvas, #qr img { image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<h1>Sign an admin action</h1>
+<p class="muted">This page does not know who you are, has no server and keeps no record of you. It
+checks the link you were sent against the data inside it, shows you exactly what it says, and hands the
+signing to Freighter. The only thing it stores is a WalletConnect session while the mobile path is
+open, and it deletes that when the request finishes.</p>
+
+<div class="guard">
+  <b>Three things to check before you approve.</b>
+  <ol>
+    <li>This message came from the <b>known proposer, on a channel you have already authenticated</b>.
+      A link plus a matching payload only proves the link and the message agree — not who sent them.</li>
+    <li>The <b>action below</b> is what you expected (and what that message says). Read the contract,
+      the function and every argument.</li>
+    <li>In Freighter, <b>tap <code>__check_auth</code> to expand it</b>, then check the
+      <b>network</b>, the <b>smart account</b> and the <b><code>signature_payload</code></b> against
+      the message you received. The released Freighter apps show the payload as <b>32 decimal
+      bytes</b> (<code>{"0":124,…,"31":238}</code>); hex or base64 are equally fine — all 32 bytes
+      must match.</li>
+  </ol>
+  If anything differs, stop and ask the proposer on another channel.
+</div>
+
+<div id="fatal" hidden></div>
+
+<section id="main" hidden>
+  <h2 style="font-size:1.1rem">The action</h2>
+  <pre id="action"></pre>
+
+  <h2 style="font-size:1.1rem">What you are signing</h2>
+  <p class="payload"><b>network</b> <span id="network"></span> &nbsp; <b>smart account</b>
+    <span id="account"></span><br>
+    <b>valid until</b> <span id="expiry"></span><br>
+    <b>account status</b> <span id="known-account"></span></p>
+  <p class="payload"><b>signature_payload</b> (hex)<br><code id="payload-hex"></code></p>
+  <p class="payload"><b>signature_payload</b> (base64)<br><code id="payload-b64"></code></p>
+  <p class="payload"><b>signature_payload</b> (32 decimal bytes — the form Freighter shows; expand
+    <code>__check_auth</code> first)<br><code id="payload-dec"></code></p>
+  <details><summary class="muted">the same bytes as Freighter prints them</summary>
+    <pre id="payload-freighter" class="payload"></pre></details>
+
+  <h2 style="font-size:1.1rem">Sign as</h2>
+  <p><label for="signer">your account</label> <select id="signer"></select></p>
+
+  <p>
+    <button id="ext" type="button">Sign with the Freighter extension</button>
+    <button id="mob" type="button">Sign with Freighter Mobile (QR)</button>
+  </p>
+  <p class="muted" id="mob-note"></p>
+  <div id="qr"></div>
+  <p id="status" role="status"></p>
+
+  <section id="share-box" hidden>
+    <h2 style="font-size:1.1rem">Send this back to the proposer</h2>
+    <p class="muted">This code contains only your signature and public data. It authorizes this one
+      action, and only until the expiry above.</p>
+    <textarea id="share" readonly spellcheck="false"></textarea>
+    <p><button id="copy" type="button">Copy the code</button> <span id="copy-status"
+      class="muted"></span></p>
+  </section>
+</section>
+
+<script src="./vendor/freighter-api-6.0.1.js"
+        integrity="sha384-PBwq0JVfqy16Z6jvKJPx93jpStXbwF2oWvsRTODkvE/3hOX5zmLvAuMiKgAaxe2b"
+        crossorigin="anonymous"></script>
+<script type="module" src="./app.mjs"></script>
+</body>
+</html>

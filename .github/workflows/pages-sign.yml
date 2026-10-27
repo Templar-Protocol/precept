@@ -1,0 +1,69 @@
+# Builds the GitHub Pages site for the hosted sign page (Templar-Protocol/precept).
+#
+# Deploys only from main, and only when sign/** (or this workflow) changes. The artifact is sign/
+# copied to _site/sign/, so the page lives at https://templar-protocol.github.io/precept/sign/.
+# Every action is pinned to a full commit SHA — tags move, SHAs do not:
+#
+#   actions/checkout                v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1
+#   actions/upload-pages-artifact   v5.0.0  fc324d3547104276b827a68afc52ff2a11cc49c9
+#   actions/deploy-pages            v5.0.1  368f82528645a54fb793d4d04e342629a3f51346
+#
+# actions/configure-pages is deliberately absent: its outputs are unused here and it can fail a
+# contents:read job. Repo-side settings (branch protection, CODEOWNERS, the github-pages environment's
+# required reviewers) are documented in the PR draft, not here.
+name: sign-page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sign/**'
+      - '.github/workflows/pages-sign.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-sign
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assemble the site (sign/ -> _site/sign/)
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          cp -r sign _site/sign
+          # only the page itself is published: tests and the dev README stay in the repo
+          rm -rf _site/sign/test _site/sign/README.md
+          # nothing may be served from outside the reviewed page directory
+          test -f _site/sign/index.html
+          # a static page has no reason to ship anything else
+          find _site -type f -printf '%p %s\n' | sort
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
