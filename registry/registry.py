@@ -23,8 +23,9 @@ from pathlib import Path
 DIR = Path(__file__).resolve().parent
 NETWORKS = {
     "testnet": "https://soroban-testnet.stellar.org",
-    # No SDF-run public mainnet RPC exists: `verify --network mainnet` needs --rpc.
-    "mainnet": None,
+    # SDF runs no public mainnet RPC; this is a free, keyless public provider
+    # listed in the Stellar docs. `--rpc` overrides it.
+    "mainnet": "https://mainnet.sorobanrpc.com",
 }
 STATUSES = ("active", "retired")
 # `refs` keys whose target is NOT a Templar-deployed contract and so need not
@@ -404,8 +405,6 @@ def cmd_verify(args):
         print(f"{args.network}: registry empty, nothing to verify")
         return 0
     url = args.rpc or NETWORKS[args.network]
-    if not url:
-        return fail([f"{args.network}: no default RPC; pass --rpc URL"])
     found = fetch(url, [instance_key(r["id"]) for r in active] + [code_key(r["hash"]) for r in wasms])
     bad = 0
     for r in active:
@@ -450,7 +449,7 @@ def main(argv=None):
         elif name == "retire":
             s.add_argument("--deployment", required=True)
         else:
-            s.add_argument("--rpc", help="Soroban JSON-RPC URL (default: the public testnet RPC)")
+            s.add_argument("--rpc", help="Soroban JSON-RPC URL (default: the network's public RPC)")
     sub.add_parser("check")
     args = p.parse_args(argv)
     return {"add": cmd_add, "retire": cmd_retire, "check": cmd_check, "verify": cmd_verify}[args.cmd](args)
