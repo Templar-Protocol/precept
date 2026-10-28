@@ -8,7 +8,7 @@
     "oracle": null,
     "backstop_take_rate": 0,
     "max_positions": 4,
-    "min_collateral": "10000000000"
+    "min_collateral": "0"
   },
   "reserves": [
     {
@@ -55,11 +55,12 @@
   "target_status": 0,
   "notes": [
     "NOT LIVE: do not deposit into, borrow from or loop against this pool until its contracts appear in mainnet.jsonl and the launch is announced.",
+    "Redeployed 2026-10-28 with min_collateral 0 (no collateral minimum): the first deployment (CBTC5WFK…QULS, 2026-10-27) used 10000000000 = 1,000 USD, which had no counterpart in the NEAR market these parameters were translated from. Every other parameter is unchanged.",
+    "min_collateral 0: no collateral minimum for borrowers; each reserve's min_position is the only dust guard.",
     "oracle: reuses the Templar runtime deployed with xlm-usdc (set oracle.runtime to its id before deploying; USDC is already registered there). deJAAA is priced by the RedStone wrapper alone (12 h heartbeat or 0.25% move), hence the 13 h max age.",
     "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
     "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a dedicated pool_oracle_adapter.",
     "Activate (set_status 0) only once the oracle has its full source set. set_status 0 also checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital.",
-    "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",
     "usdc IRM (fixed, reactivity 0): flat 3.3% up to U=90%, 13.3% at 95%, 23.3% at 100%. The kink above 90% is there because reserve configs freeze after setup.",
     "dejaaa is a custom Soroban token (Centrifuge wrapped AAA CLO, not a SAC); 18 decimals per its on-chain decimals(). Collateral only; r_base 1000 is the contract minimum. min_position = 1 deJAAA.",
     "supply_cap is i128::MAX: no on-chain cap, and it can never be lowered. The pilot limit is enforced in the app only.",

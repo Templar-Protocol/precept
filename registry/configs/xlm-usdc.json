@@ -8,7 +8,7 @@
     "oracle": null,
     "backstop_take_rate": 0,
     "max_positions": 4,
-    "min_collateral": "10000000000"
+    "min_collateral": "0"
   },
   "reserves": [
     {
@@ -55,10 +55,11 @@
   "target_status": 0,
   "notes": [
     "NOT LIVE: do not deposit into, borrow from or loop against this pool until its contracts appear in mainnet.jsonl and the launch is announced.",
-    "oracle: Pyth Lazer (mainnet verifier, feeds USDC 7 / XLM 23) and the RedStone multi-feed SEP-40 wrapper, base USD; one source suffices. Freshness window 1 h for both assets (a price older than 3600 s is not served): set to keep keeper cost down; it lives in the runtime's per-asset ProxyConfig and governance can change it later with SetProxy. This pool deploys the shared Templar oracle runtime.",
+    "Redeployed 2026-10-28 with min_collateral 0 (no collateral minimum): the first deployment (CAILFZ2M…7DPF, 2026-10-27) used 10000000000 = 1,000 USD, which had no counterpart in the NEAR market these parameters were translated from. Every other parameter is unchanged.",
+    "min_collateral 0: no collateral minimum for borrowers; each reserve's min_position is the only dust guard.",
+    "oracle: Pyth Lazer (mainnet verifier, feeds USDC 7 / XLM 23) and the RedStone multi-feed SEP-40 wrapper, base USD; one source suffices. Freshness window 1 h for both assets (a price older than 3600 s is not served): set to keep keeper cost down; it lives in the runtime's per-asset ProxyConfig and governance can change it later with SetProxy. It reuses the shared Templar oracle runtime (oracle.runtime), declared exactly as registered: the Lazer source keyed {\"Other\":\"<feed>\"} plus the RedStone wrapper.",
     "admin is a temporary operator key; it hands over to the final admin with the pool's two-step propose_admin/accept_admin transfer.",
     "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a pool_oracle_adapter over the Templar proxy runtime.",
-    "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",
     "max_positions 4 covers every pairing of the two reserves, including a liquidation auction's lot + bid.",
     "reserves: USDC is Circle's SAC, XLM the native SAC; both 7 decimals. usdc IRM (fixed, reactivity 0): 0.01% at U=0, 8% at 90%, 20% at 95%, 32% at 100%. xlm is collateral only; r_base 1000 is the contract minimum.",
     "supply_cap is i128::MAX: no on-chain cap, and it can never be lowered (reserve configs freeze after setup). The pilot limit is enforced in the app only.",
@@ -66,15 +67,17 @@
     "set_status 0 checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital."
   ],
   "oracle": {
-    "lazer_verifier": "CACZ3GBAKUPIAFRILUFO27J5RUH5GJ2VSJ46LP6GJYSKGDRTQ5MS3HCH",
     "assets": {
       "usdc": {
         "min_sources": 1,
         "max_age_secs": 3600,
         "sources": [
           {
-            "kind": "lazer",
-            "feed_id": 7
+            "kind": "sep40",
+            "contract": "CDXOHZDLLF6AMQ5NLZQOWRSBQIJBFPC4KWQ6SOLKQSQOP2EYDQC4E5IB",
+            "asset": {
+              "Other": "7"
+            }
           },
           {
             "kind": "sep40",
@@ -90,8 +93,11 @@
         "max_age_secs": 3600,
         "sources": [
           {
-            "kind": "lazer",
-            "feed_id": 23
+            "kind": "sep40",
+            "contract": "CDXOHZDLLF6AMQ5NLZQOWRSBQIJBFPC4KWQ6SOLKQSQOP2EYDQC4E5IB",
+            "asset": {
+              "Other": "23"
+            }
           },
           {
             "kind": "sep40",
@@ -102,6 +108,7 @@
           }
         ]
       }
-    }
+    },
+    "runtime": "CBTCHY4LFA5K3SDCOSUCZWO6VNKL4M7WRVXSRCXGVJGEZTX4D3DGGI4X"
   }
 }
