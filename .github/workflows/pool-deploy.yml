@@ -1,0 +1,204 @@
+name: pool-deploy
+# Issue #49, steps 3-4. A merge that adds or changes a pool config under
+# registry/configs/ deploys it with exactly the plan its PR was reviewed with
+# (the digest pool-plan.yml commented), then hands every admin role to the
+# config's pool.admin / oracle.admin. The curator accepts from their own
+# wallet; activation (set_status) stays theirs. CI never passes --activate.
+#
+# Custody: the deployer key lives in Secret Manager and is reached through
+# GitHub OIDC -> Workload Identity Federation, only from the protected
+# `testnet`/`mainnet` environment on main (precept-internal
+# infra/market-deployer). The run directory (journal + frozen plan), the staged
+# config and the approved digest are synced to a versioned bucket, so a crashed
+# or stopped run resumes with workflow_dispatch run=<run id>; settled steps are
+# never sent again. One deploy at a time.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - registry/configs/**
+  workflow_dispatch:
+    inputs:
+      run:
+        description: "Run id to resume, as printed in the PR comment: <config>-<network>-<head sha prefix>"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pool-deploy
+  cancel-in-progress: false
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      runs: ${{ steps.select.outputs.runs }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: select
+        env:
+          BEFORE: ${{ github.event.before }}
+          RUN: ${{ inputs.run }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            [[ "$RUN" =~ ^([a-z0-9][a-z0-9-]*)-(testnet|mainnet)-([0-9a-f]{12})$ ]] \
+              || { echo "::error::run must look like <config>-<network>-<12 hex>"; exit 1; }
+            jq -cn --arg run "$RUN" --arg network "${BASH_REMATCH[2]}" \
+              '[{run: $run, network: $network, resume: true}]' > runs.json
+          else
+            python3 scripts/pool_deploy_ci.py stage-push \
+              --repo "$GITHUB_REPOSITORY" --before "$BEFORE" --after "$GITHUB_SHA" \
+              | jq -c 'map(. + {resume: false})' > runs.json
+          fi
+          cat runs.json
+          echo "runs=$(cat runs.json)" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: select
+    if: needs.select.outputs.runs != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        entry: ${{ fromJSON(needs.select.outputs.runs) }}
+      max-parallel: 1
+      fail-fast: false
+    environment: ${{ matrix.entry.network }}
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN: ${{ matrix.entry.run }}
+      BUCKET: ${{ vars.POOL_DEPLOY_JOURNAL_BUCKET }}
+      STAGE: /tmp/precept-pool-deploy
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: stellar/actions/rust-cache@97ffa3486f8d355535d989edfe78795f05ec11b6 # main as of 2026-10-23
+      - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
+        with:
+          version: 28.1.0
+      - name: Build the deployer
+        working-directory: tools/abtest
+        run: |
+          rustup toolchain install
+          cargo build --locked --release
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.POOL_DEPLOY_WIF_PROVIDER }}
+          service_account: ${{ vars.POOL_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Fresh run - record entry, config and approved digest
+        if: ${{ !matrix.entry.resume }}
+        env:
+          ENTRY: ${{ toJSON(matrix.entry) }}
+        run: |
+          set -euo pipefail
+          # A merge never continues another run's journal: same run id means
+          # the same PR head was already deployed (or is being resumed).
+          if gcloud storage ls "gs://$BUCKET/$RUN/" >/dev/null 2>&1; then
+            echo "::error::gs://$BUCKET/$RUN already exists; resume it with workflow_dispatch run=$RUN"; exit 1
+          fi
+          name=$(jq -r .name <<<"$ENTRY")
+          python3 scripts/pool_deploy_ci.py stage-push --repo "$GITHUB_REPOSITORY" \
+            --before "${{ github.event.before }}" --after "$GITHUB_SHA" > /dev/null
+          approved=$(python3 scripts/pool_deploy_ci.py approved --repo "$GITHUB_REPOSITORY" \
+            --pr "$(jq -r .pr <<<"$ENTRY")" --run "$RUN")
+          mkdir -p "$STAGE/meta"
+          jq -c . <<<"$ENTRY" > "$STAGE/meta/entry.json"
+          printf '%s' "$approved" > "$STAGE/meta/approved-plan-sha256"
+          gcloud storage cp "$STAGE/meta/entry.json" "$STAGE/meta/approved-plan-sha256" "gs://$BUCKET/$RUN/"
+          gcloud storage cp "$STAGE/configs/$name.json" "gs://$BUCKET/$RUN/config.json"
+
+      - name: Resume - restore entry, config, digest and journal
+        if: ${{ matrix.entry.resume }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$STAGE/meta" "$STAGE/configs" "$STAGE/runs/$RUN"
+          gcloud storage cp "gs://$BUCKET/$RUN/entry.json" "gs://$BUCKET/$RUN/approved-plan-sha256" "$STAGE/meta/"
+          name=$(jq -r .name "$STAGE/meta/entry.json")
+          gcloud storage cp "gs://$BUCKET/$RUN/config.json" "$STAGE/configs/$name.json"
+          gcloud storage rsync --recursive "gs://$BUCKET/$RUN/journal" "$STAGE/runs/$RUN"
+
+      - name: Import the deployer key
+        env:
+          SEED_SECRET: ${{ vars.POOL_DEPLOY_SEED_SECRET }}
+          ACCOUNT: ${{ vars.POOL_DEPLOY_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/stellar-$RUN"
+          mkdir -p "$dir"
+          gcloud secrets versions access "${SEED_SECRET##*/versions/}" --secret "$(cut -d/ -f4 <<<"$SEED_SECRET")" \
+            --project "$(cut -d/ -f2 <<<"$SEED_SECRET")" \
+            | stellar keys add pool-deployer --secret-key --config-dir "$dir" >/dev/null
+          got=$(stellar keys public-key pool-deployer --config-dir "$dir")
+          [ "$got" = "$ACCOUNT" ] || { echo "::error::the seed is not POOL_DEPLOY_ACCOUNT ($ACCOUNT)"; exit 1; }
+
+      - name: Deploy and hand over
+        id: deploy
+        env:
+          MAINNET_RPC: ${{ vars.MAINNET_RPC }}
+        run: |
+          set -euo pipefail
+          network=$(jq -r .network "$STAGE/meta/entry.json")
+          if [ "$network" = mainnet ]; then rpc=${MAINNET_RPC:-https://mainnet.sorobanrpc.com}; else rpc=https://soroban-testnet.stellar.org; fi
+          # Mirror the journal every 20 s so a runner that dies mid-send
+          # leaves its intents in the bucket; the deployer reconciles them
+          # from the chain on resume. Deletions are mirrored too: the
+          # deployer archives a stopped intent by moving it, and a stale copy
+          # left in the bucket would come back as an open intent on resume.
+          # The bucket is versioned, so nothing deleted here is lost.
+          ( while sleep 20; do gcloud storage rsync --recursive --delete-unmatched-destination-objects --quiet "$STAGE/runs/$RUN" "gs://$BUCKET/$RUN/journal" || true; done ) &
+          echo "sync_pid=$!" >> "$GITHUB_OUTPUT"
+          python3 scripts/pool_deploy_ci.py deploy --entry "$(cat "$STAGE/meta/entry.json")" \
+            --repo "$GITHUB_REPOSITORY" --approve "$(cat "$STAGE/meta/approved-plan-sha256")" \
+            --bin "$PWD/tools/abtest/target/release/precept-abtest" --stellar "$(command -v stellar)" \
+            --rpc "$rpc" --config-dir "$RUNNER_TEMP/stellar-$RUN" \
+            --events "$RUNNER_TEMP/deploy-$RUN.jsonl" --summary "$RUNNER_TEMP/summary-$RUN.md"
+
+      - name: Persist the journal
+        if: always()
+        run: |
+          kill "${{ steps.deploy.outputs.sync_pid }}" 2>/dev/null || true
+          if [ -d "$STAGE/runs/$RUN" ]; then
+            gcloud storage rsync --recursive --delete-unmatched-destination-objects "$STAGE/runs/$RUN" "gs://$BUCKET/$RUN/journal"
+          fi
+          rm -rf "$RUNNER_TEMP/stellar-$RUN"
+          cat "$RUNNER_TEMP/summary-$RUN.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Open the registry PR
+        if: success()
+        run: |
+          set -euo pipefail
+          git diff --quiet -- registry/testnet.jsonl registry/mainnet.jsonl && { echo "nothing recorded"; exit 0; }
+          branch="registry/pool-deploy-$RUN"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add registry/testnet.jsonl registry/mainnet.jsonl
+          git commit -m "registry: $RUN deployed by pool-deploy"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+          gh pr create --base main --head "$branch" --title "registry: $RUN deployed" \
+            --body-file "$RUNNER_TEMP/summary-$RUN.md"
+
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pool-deploy-${{ matrix.entry.run }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deploy-*.jsonl
+          if-no-files-found: ignore
+          retention-days: 90

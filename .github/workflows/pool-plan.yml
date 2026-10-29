@@ -1,0 +1,84 @@
+name: pool-plan
+# Issue #49, step 1. For every pool config a PR adds or changes under
+# registry/configs/, run the deployer in robot mode without approval: it reads
+# the chain, prints the plan and its plan_sha256, sends nothing, and exits 3.
+# The plan, its digest and the config gate's verdict land as a PR comment;
+# merging the PR approves exactly that digest (pool-deploy.yml).
+#
+# pull_request_target so fork PRs can be commented on. It is safe because no
+# code from the PR runs: the checkout is the BASE commit, and the PR's config
+# files are fetched through the API as data (scripts/pool_deploy_ci.py
+# stage-pr). There are no secrets here; the deployer account is a public key.
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    paths:
+      - registry/configs/**
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pool-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: stellar/actions/rust-cache@97ffa3486f8d355535d989edfe78795f05ec11b6 # main as of 2026-10-23
+      - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
+        with:
+          version: 28.1.0
+      - name: Build the deployer (base commit)
+        working-directory: tools/abtest
+        run: |
+          rustup toolchain install
+          cargo build --locked --release
+      - name: Stage the PR's configs as data
+        run: |
+          python3 scripts/pool_deploy_ci.py stage-pr \
+            --repo "$GITHUB_REPOSITORY" --pr "${{ github.event.pull_request.number }}" \
+            > "$RUNNER_TEMP/staged.json"
+          cat "$RUNNER_TEMP/staged.json"
+      - name: Gate and plan each config
+        env:
+          ACCOUNT_TESTNET: ${{ vars.POOL_DEPLOY_ACCOUNT_TESTNET }}
+          ACCOUNT_MAINNET: ${{ vars.POOL_DEPLOY_ACCOUNT_MAINNET }}
+          MAINNET_RPC: ${{ vars.MAINNET_RPC }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          rc=0
+          while read -r entry; do
+            network=$(jq -r .network <<<"$entry")
+            if [ "$network" = mainnet ]; then
+              account=$ACCOUNT_MAINNET; rpc=${MAINNET_RPC:-https://mainnet.sorobanrpc.com}
+            else
+              account=$ACCOUNT_TESTNET; rpc=https://soroban-testnet.stellar.org
+            fi
+            test -n "$account" || { echo "::error::POOL_DEPLOY_ACCOUNT_${network^^} is not set"; exit 1; }
+            run=$(jq -r .run <<<"$entry")
+            python3 scripts/pool_deploy_ci.py plan --entry "$entry" \
+              --repo "$GITHUB_REPOSITORY" --pr "${{ github.event.pull_request.number }}" --head-sha "$HEAD_SHA" \
+              --bin "$PWD/tools/abtest/target/release/precept-abtest" --stellar "$(command -v stellar)" \
+              --rpc "$rpc" --account "$account" \
+              --config-dir "$RUNNER_TEMP/stellar-$run" --events "$RUNNER_TEMP/plan-$run.jsonl" || rc=1
+          done < <(jq -c '.[]' "$RUNNER_TEMP/staged.json")
+          exit $rc
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pool-plan-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/plan-*.jsonl
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,11 @@
+# A merged pool config is deployed to its network by CI (pool-deploy.yml), so
+# the config, the deployer and the workflows that run it need a Templar review.
+# Effective once main requires code-owner review.
+/registry/configs/                    @carrion256 @royalf00l @peer2f00l
+/registry/registry.py                 @carrion256 @royalf00l @peer2f00l
+/tools/abtest/                        @carrion256 @royalf00l @peer2f00l
+/scripts/pool_deploy_ci.py            @carrion256 @royalf00l @peer2f00l
+/scripts/test_pool_deploy_ci.py       @carrion256 @royalf00l @peer2f00l
+/.github/workflows/pool-plan.yml      @carrion256 @royalf00l @peer2f00l
+/.github/workflows/pool-deploy.yml    @carrion256 @royalf00l @peer2f00l
+/.github/CODEOWNERS                   @carrion256 @royalf00l @peer2f00l

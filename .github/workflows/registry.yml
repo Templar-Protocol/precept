@@ -33,7 +33,9 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Unit tests
-        run: python3 -m unittest discover -s registry -v
+        run: |
+          python3 -m unittest discover -s registry -v
+          python3 -m unittest scripts/test_pool_deploy_ci.py -v
       - name: Registry check
         run: python3 registry/registry.py check
 
