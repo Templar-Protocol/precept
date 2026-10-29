@@ -1575,9 +1575,15 @@ pub struct MarketReserve {
 pub struct PoolSpec {
     /// The pool's own name, as the factory records it.
     pub name: String,
-    /// The pool admin: a G-address. For a launch pool this is the temporary
-    /// operator key handed over after the multisig is confirmed.
+    /// The pool's final admin: a G or C address. The run's operator holds the
+    /// pool until the handoff phase proposes this address as the admin, and
+    /// it becomes the Comet controller.
     pub admin: String,
+    /// Receiver of the oracle roles at handoff (a G or C address); `None`
+    /// means `admin`. Skipped when absent, so legacy config digests are
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_admin: Option<String>,
     pub backstop_take_rate: u32,
     pub max_positions: u32,
     /// Effective collateral requirement in 7-decimal oracle base units.
@@ -1647,6 +1653,11 @@ struct RegistryPoolInner {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegistryOracle {
+    /// Who receives this run's oracle roles at handoff: governance `Admin` of a
+    /// runtime the run deploys, and ownership of every Lazer source it
+    /// deploys. Absent means the pool's final admin.
+    #[serde(default)]
+    admin: Option<String>,
     /// The Pyth Lazer verifier every Lazer source of this pool binds. Present
     /// whenever any source is a Lazer instance.
     #[serde(default)]
@@ -1770,9 +1781,14 @@ impl RegistryPoolConfig {
             self.network
         );
         anyhow::ensure!(!self.name.trim().is_empty(), "the pool config has no name");
-        let (verifier, runtime, declared_assets) = match self.oracle {
-            Some(oracle) => (oracle.lazer_verifier, oracle.runtime, oracle.assets),
-            None => (None, None, BTreeMap::new()),
+        let (verifier, runtime, declared_assets, oracle_admin) = match self.oracle {
+            Some(oracle) => (
+                oracle.lazer_verifier,
+                oracle.runtime,
+                oracle.assets,
+                oracle.admin,
+            ),
+            None => (None, None, BTreeMap::new(), None),
         };
         let _ = (self.proposed_by, self.notes);
         let mut reserves = self
@@ -1810,6 +1826,7 @@ impl RegistryPoolConfig {
         Ok(PoolSpec {
             name: self.pool.name,
             admin: self.pool.admin,
+            oracle_admin,
             backstop_take_rate: self.pool.backstop_take_rate,
             max_positions: self.pool.max_positions,
             min_collateral: self.pool.min_collateral,
@@ -2312,10 +2329,16 @@ impl MarketConfig {
             "a real market requires a pool name of 1-64 characters"
         );
         anyhow::ensure!(
-            AccountId::from_str(&pool.admin).is_ok(),
-            "the pool admin must be a G-address: a launch pool's admin is the \
-             temporary operator key handed over after the multisig is confirmed"
+            is_g_or_c(&pool.admin),
+            "the pool admin must be a G or C address: the curator's account or \
+             contract that holds the pool once the run hands it over"
         );
+        if let Some(oracle_admin) = &pool.oracle_admin {
+            anyhow::ensure!(
+                is_g_or_c(oracle_admin),
+                "the oracle admin must be a G or C address"
+            );
+        }
         anyhow::ensure!(
             pool.backstop_take_rate <= MARKET_7DP_UNIT,
             "backstop_take_rate must be a 7-decimal fraction"
@@ -2665,6 +2688,11 @@ impl MarketConfig {
 
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A checksum-valid account or contract strkey — anything that can hold a role.
+fn is_g_or_c(s: &str) -> bool {
+    AccountId::from_str(s).is_ok() || ContractId::from_str(s).is_ok()
 }
 
 /// Network facts a market manifest may persist: the exact testnet passphrase
@@ -4107,7 +4135,20 @@ mod market_tests {
             "admin = \"\"",
         );
         let err = format!("{:#}", parse(&dir, &no_admin).unwrap_err());
-        assert!(err.contains("pool admin must be a G-address"), "{err}");
+        assert!(err.contains("pool admin must be a G or C address"), "{err}");
+        // A contract admin is a valid final admin, and so is an oracle admin.
+        let c_admin = real_config(&dir, true).replace(
+            &format!("admin = \"{G_ADMIN}\""),
+            &format!("admin = \"{VERIFIER}\"\noracle_admin = \"{G_ADMIN}\""),
+        );
+        let cfg = parse(&dir, &c_admin).unwrap();
+        assert_eq!(cfg.pool.as_ref().unwrap().oracle_admin.as_deref(), Some(G_ADMIN));
+        let bad_oracle_admin = c_admin.replace(
+            &format!("oracle_admin = \"{G_ADMIN}\""),
+            "oracle_admin = \"GNOTANADDRESS\"",
+        );
+        let err = format!("{:#}", parse(&dir, &bad_oracle_admin).unwrap_err());
+        assert!(err.contains("oracle admin must be a G or C address"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

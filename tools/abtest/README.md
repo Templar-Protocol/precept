@@ -663,6 +663,40 @@ them uploads and deploys them.
 command line. No mainnet send has happened. The testnet rehearsal is
 unfinished.
 
+### Handing the market over
+
+A pool config may name an owner that is not the key running the deployment.
+`pool.admin` is the address the pool belongs to when the run is over, and
+`oracle.admin` the address the oracle contracts belong to; each is a strkey, an
+account (`G…`) or a contract (`C…`). The deploying key still signs every send —
+the configuration says who the market ends up belonging to, not who pays for
+the transaction. A target that is not on the network at all, an account with no
+ledger entry or a contract that has never been deployed, is refused at preflight
+before anything is sent: the run would only meet it at the end.
+
+Nothing is handed over when both fields name the deploying key, and a config
+written before these fields existed names nothing, so those runs get the graph
+they always got, coordinate for coordinate. When something is owed, one more
+phase runs after the backing pool is frozen (and after activation, when
+`--activate` asked for it; without it the pool is handed over still in setup
+status 6 and activating it is the new admin's call), in this order: the pool's `propose_admin` to
+`pool.admin`, a two-step `transfer_ownership` of each Lazer source this run
+deployed to `oracle.admin`, then — when this run deployed the runtime and its
+governance — a governance proposal granting `Admin` to `oracle.admin` and a
+second removing it from the deploying key, and last the backing pool's
+`set_controller` to `pool.admin`.
+
+Each coordinate first asks whether its target already holds what would be
+handed to it, and settles without sending when it does; an ownership proposal
+that is already open is this run's own work, not a second proposal to make. The
+two governance halves are skipped as a pair. Nothing here is complete on the
+chain: `propose_admin` and `transfer_ownership` ask the new owner to accept, and
+the acceptance is what a curator signs. A finished run therefore ends with the
+list of calls still owed — the contract, the method, and the key that must sign
+it — printed for a human and carried as `handoff.accept` in the `done` event for
+a robot, so a driver can tell "deployed" from "deployed and waiting for the
+curator". An empty list means the market is fully its own.
+
 ## Shared `just` recipes
 
 `justfile` in this directory wraps the common market commands. Run `just` here,

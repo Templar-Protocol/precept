@@ -377,5 +377,192 @@ class RegistryTest(unittest.TestCase):
         return registry.base64.b64encode(bytes(b)).decode()
 
 
+G_ADMIN = registry.strkey_encode("G", b"\x55" * 32)
+C_ADMIN = registry.strkey_encode("C", b"\x56" * 32)
+
+
+def reserve(index, label, **over):
+    c = {
+        "index": index, "decimals": 7, "c_factor": 0, "l_factor": registry.SCALE,
+        "util": 9_000_000, "max_util": 9_900_000, "r_base": 1000, "r_one": 0,
+        "r_two": 0, "r_three": 0, "reactivity": 0,
+        "supply_cap": str(registry.I128_MAX), "min_position": "10000000", "enabled": True,
+    }
+    c.update(over)
+    return {"asset": registry.strkey_encode("C", bytes([0x60 + index]) * 32), "label": label, "config": c}
+
+
+def oracle_asset(**over):
+    a = {
+        "min_sources": 1, "max_age_secs": 3600,
+        "sources": [{"kind": "sep40", "contract": registry.strkey_encode("C", b"\x99" * 32),
+                     "asset": {"Other": "7"}}],
+    }
+    a.update(over)
+    return a
+
+
+def pool_cfg(**over):
+    """A config that passes check-config; `over` replaces a top-level key."""
+    cfg = {
+        "name": "test-pool",
+        "network": "mainnet",
+        "pool": {"admin": G_ADMIN, "name": "Test", "oracle": None,
+                 "backstop_take_rate": 0, "max_positions": 4, "min_collateral": "0"},
+        "reserves": [reserve(0, "usdc"),
+                     reserve(1, "xlm", c_factor=8_000_000, l_factor=0, util=8_000_000,
+                             max_util=9_000_000, supply_cap="200000000000000",
+                             min_position="500000000")],
+        "target_status": 0,
+        "oracle": {"assets": {"usdc": oracle_asset(), "xlm": oracle_asset()}},
+    }
+    cfg.update(over)
+    return cfg
+
+
+def setp(obj, dotted, value):
+    node = obj
+    parts = dotted.split(".")
+    for p in parts[:-1]:
+        node = node[int(p)] if isinstance(node, list) else node[p]
+    last = parts[-1]
+    if isinstance(node, list):
+        node[int(last)] = value
+    else:
+        node[last] = value
+    return obj
+
+
+class CheckConfigTest(unittest.TestCase):
+    """`registry.py check-config`, offline: the RPC lookup is mocked."""
+
+    def setUp(self):
+        self.fetch = registry.fetch
+        registry.fetch = lambda url, keys: {k: "x" for k in keys}
+
+    def tearDown(self):
+        registry.fetch = self.fetch
+
+    def problems(self, *edits, network="mainnet"):
+        cfg = pool_cfg()
+        for dotted, value in edits:
+            setp(cfg, dotted, value)
+        return registry.check_config(cfg, network, "http://rpc")[0]
+
+    def assertProblem(self, errs, needle):
+        self.assertTrue(any(needle in e for e in errs), f"{needle!r} not in {errs}")
+
+    def test_clean_config_passes(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_real_repo_config_passes(self):
+        path = Path(__file__).resolve().parent / "configs" / "xlm-usdc.json"
+        errs, summary = registry.check_config(json.loads(path.read_text()), "mainnet", "http://rpc")
+        self.assertEqual(errs, [], "\n".join(errs))
+        self.assertIn("reuses runtime", summary)
+
+    def test_wrong_network(self):
+        self.assertProblem(self.problems(("network", "testnet"), ), "expected 'mainnet'")
+        self.assertProblem(self.problems(network="testnet"), "expected 'testnet'")
+
+    def test_c_factor_bound(self):
+        self.assertProblem(self.problems(("reserves.1.config.c_factor", registry.SCALE)),
+                           "reserves[1].config.c_factor")
+
+    def test_l_factor_bound(self):
+        self.assertProblem(self.problems(("reserves.0.config.l_factor", registry.SCALE + 1)),
+                           "reserves[0].config.l_factor")
+
+    def test_util_bounds(self):
+        self.assertProblem(self.problems(("reserves.0.config.util", 0)), "0 < util < max_util")
+        self.assertProblem(self.problems(("reserves.0.config.util", 9_900_000)), "0 < util < max_util")
+        self.assertProblem(self.problems(("reserves.0.config.max_util", registry.SCALE)), "0 < util < max_util")
+        # A collateral-only reserve (l_factor 0) is exempt.
+        self.assertEqual(self.problems(("reserves.1.config.util", 0)), [])
+
+    def test_i128_fields(self):
+        for field in ("supply_cap", "min_position"):
+            for bad in ("0", "-1", "1e9", "", "1" * 40):
+                self.assertProblem(self.problems((f"reserves.0.config.{field}", bad)), field)
+        self.assertEqual(self.problems(("reserves.0.config.supply_cap", str(registry.I128_MAX))), [])
+
+    def test_oracle_quorum_and_age(self):
+        self.assertProblem(self.problems(("oracle.assets.usdc.min_sources", 0)), "min_sources")
+        self.assertProblem(self.problems(("oracle.assets.usdc.min_sources", 2)), "min_sources")
+        self.assertProblem(self.problems(("oracle.assets.usdc.max_age_secs", 30)), "max_age_secs")
+        self.assertProblem(self.problems(("oracle.assets.usdc.max_age_secs", 86_401)), "max_age_secs")
+
+    def test_reserve_without_oracle_entry(self):
+        self.assertProblem(self.problems(("reserves.1.label", "gone")), "oracle.assets.gone: missing")
+
+    def test_backstop_take_rate_bound(self):
+        self.assertProblem(self.problems(("pool.backstop_take_rate", registry.SCALE + 1)),
+                           "pool.backstop_take_rate")
+
+    def test_max_positions_bound(self):
+        for bad in (0, 31):
+            self.assertProblem(self.problems(("pool.max_positions", bad)), "pool.max_positions")
+
+    def test_reserve_indices_must_be_in_order(self):
+        self.assertProblem(self.problems(("reserves.1.config.index", 5)), "0..n-1 in order")
+
+    def test_undecided_null_is_an_error(self):
+        self.assertProblem(self.problems(("pool.max_positions", None)), "undecided")
+        # pool.oracle is filled by the deployer, so its null stays fine.
+        self.assertEqual(self.problems(("pool.oracle", None)), [])
+
+    def test_missing_admin_account(self):
+        registry.fetch = lambda url, keys: {}
+        self.assertProblem(self.problems(), f"{G_ADMIN} has no account on mainnet")
+        self.assertProblem(self.problems(("pool.admin", C_ADMIN)),
+                           f"{C_ADMIN} has no contract instance on mainnet")
+
+    def test_malformed_admin(self):
+        # Recorded rather than failing inside fetch: check_config turns a
+        # fetch exception into a problem line, so self.fail() there would pass.
+        calls = []
+        registry.fetch = lambda url, keys: calls.append(keys) or {}
+        for bad in ("G" + "A" * 55, "X" + G_ADMIN[1:], 56 * "G"):
+            errs = self.problems(("pool.admin", bad))
+            self.assertProblem(errs, "not a checksum-valid G or C strkey")
+        self.assertEqual(calls, [], "a malformed admin must not be looked up on chain")
+
+    def test_missing_sources_with_a_bad_quorum_reports_instead_of_crashing(self):
+        errs = self.problems(("oracle.assets.usdc.sources", None), ("oracle.assets.usdc.min_sources", 0))
+        self.assertProblem(errs, "oracle.assets.usdc.min_sources")
+
+    def test_optional_oracle_admin(self):
+        self.assertEqual(self.problems(("oracle.admin", C_ADMIN)), [])
+        registry.fetch = lambda url, keys: {}
+        self.assertProblem(self.problems(("oracle.admin", C_ADMIN)), "oracle.admin")
+
+    def test_own_runtime_summary(self):
+        cfg = pool_cfg()
+        self.assertIn("deploys its own runtime", registry.check_config(cfg, "mainnet", "http://rpc")[1])
+        self.assertIn("reuses runtime", registry.check_config(setp(pool_cfg(), "oracle.runtime", C_ADMIN),
+                                                              "mainnet", "http://rpc")[1])
+
+    def test_cli_exit_code_and_rpc_default(self):
+        d = Path(tempfile.mkdtemp())
+        good, bad = d / "good.json", d / "bad.json"
+        good.write_text(json.dumps(pool_cfg()))
+        bad.write_text(json.dumps(setp(pool_cfg(), "pool.max_positions", 99)))
+        urls = []
+        registry.fetch = lambda url, keys: urls.append(url) or {k: "x" for k in keys}
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            code = registry.main(["check-config", str(good), "--network", "mainnet"])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn(f"{good}: ok", out.getvalue())
+        self.assertEqual(urls, [registry.NETWORKS["mainnet"]])
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            code = registry.main(["check-config", str(good), str(bad), "--network", "mainnet",
+                                  "--rpc", "http://own"])
+        self.assertEqual(code, 1)
+        self.assertIn(f"{bad}: pool.max_positions", out.getvalue())
+        self.assertEqual(urls[-1], "http://own")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -922,11 +922,21 @@ fn market_explorer_call<T>(result: anyhow::Result<T>) -> anyhow::Result<T> {
     result.map_err(|e| anyhow::anyhow!("{}", Safe::error_chain(Policy::Market, &e)))
 }
 
+/// The acceptances one event should carry. Only `done` can carry any, and only
+/// a run that owed a handoff has anything to say: every other event, and every
+/// run whose final admins were the operator all along, prints exactly as it
+/// did before a curator could hold a pool.
+fn handoff_for(ev: &DeployEvent, deployer: &MarketDeployer) -> Option<serde_json::Value> {
+    matches!(ev, DeployEvent::Done(_))
+        .then(|| deployer.handoff_acceptance())
+        .flatten()
+}
+
 /// Print one deployment event. Headless deployment and the TUI observe the
 /// same event grammar; only the presentation differs. A stopped step's
 /// violations are printed with its failure: the event's reason says the run
 /// stopped, and these say what the step's proof objected to.
-fn print_deploy_event(ev: &DeployEvent, violations: &[Safe]) {
+fn print_deploy_event(ev: &DeployEvent, violations: &[Safe], handoff: Option<&serde_json::Value>) {
     match ev {
         DeployEvent::Phase { id, label } => println!("phase {id}: {label}"),
         DeployEvent::Confirm { summary, .. } => {
@@ -938,6 +948,29 @@ fn print_deploy_event(ev: &DeployEvent, violations: &[Safe]) {
         }
         DeployEvent::Done(manifest) => {
             print_market_summary(manifest);
+            // The same list the robot event carries, in the same order: what
+            // the network is still waiting for someone else to sign. A run
+            // that handed nothing over prints nothing here.
+            if let Some(accept) = handoff
+                .and_then(|handoff| handoff.get("accept"))
+                .and_then(serde_json::Value::as_array)
+            {
+                println!("awaiting the curator's signature:");
+                for item in accept {
+                    let contract = item.get("contract").and_then(serde_json::Value::as_str);
+                    let method = item.get("method").and_then(serde_json::Value::as_str);
+                    let by = item.get("by").and_then(serde_json::Value::as_str);
+                    let before = item.get("before_ledger").and_then(serde_json::Value::as_u64);
+                    if let (Some(contract), Some(method), Some(by)) = (contract, method, by) {
+                        match before {
+                            Some(before) => println!(
+                                "  {by} signs {method} on {contract}, valid through ledger {before}"
+                            ),
+                            None => println!("  {by} signs {method} on {contract}"),
+                        }
+                    }
+                }
+            }
         }
         DeployEvent::Failed(reason) => {
             eprintln!("deployment failed: {reason}");
@@ -1013,7 +1046,11 @@ fn market_pump(deployer: &mut MarketDeployer) -> anyhow::Result<i32> {
                 anyhow::anyhow!("market deployment not sent: terminal input could not be cleared")
             })?;
         }
-        print_deploy_event(&ev, deployer.stopped_violations());
+        print_deploy_event(
+            &ev,
+            deployer.stopped_violations(),
+            handoff_for(&ev, deployer).as_ref(),
+        );
         match ev {
             DeployEvent::Done(_) => return Ok(0),
             DeployEvent::Failed(_) => return Ok(1),
@@ -1024,7 +1061,11 @@ fn market_pump(deployer: &mut MarketDeployer) -> anyhow::Result<i32> {
                 if !confirm_on_stdin()? {
                     let stop = deployer.step(DeployAct::Halt);
                     if let Ok(ev) = stop {
-                        print_deploy_event(&ev, deployer.stopped_violations());
+                        print_deploy_event(
+                            &ev,
+                            deployer.stopped_violations(),
+                            handoff_for(&ev, deployer).as_ref(),
+                        );
                     }
                     return Ok(1);
                 }
@@ -1088,7 +1129,14 @@ fn market_pump_robot(
             _ => None,
         };
         if let Some(code) = code {
-            println!("{}", robot_event(&ev, deployer.stopped_violations()));
+            println!(
+                "{}",
+                robot_event(
+                    &ev,
+                    deployer.stopped_violations(),
+                    handoff_for(&ev, deployer).as_ref()
+                )
+            );
             return Ok(code);
         }
         match ev {
@@ -1129,7 +1177,11 @@ fn market_pump_robot(
             }
             other => println!(
                 "{}",
-                robot_event(&other, deployer.stopped_violations())
+                robot_event(
+                    &other,
+                    deployer.stopped_violations(),
+                    handoff_for(&other, deployer).as_ref()
+                )
             ),
         }
         act = DeployAct::Continue;
@@ -1141,7 +1193,11 @@ fn market_pump_robot(
 /// digest, and no bound token reaches stdout, a log, or a capture. A failure
 /// carries the violations that stopped the step, so a consumer sees what the
 /// step's own proof objected to rather than a bare exit code.
-fn robot_event(ev: &DeployEvent, violations: &[Safe]) -> serde_json::Value {
+fn robot_event(
+    ev: &DeployEvent,
+    violations: &[Safe],
+    handoff: Option<&serde_json::Value>,
+) -> serde_json::Value {
     match ev {
         DeployEvent::Phase { id, label } => {
             serde_json::json!({"event": "phase", "phase": id, "label": label.to_string()})
@@ -1152,17 +1208,29 @@ fn robot_event(ev: &DeployEvent, violations: &[Safe]) -> serde_json::Value {
             "unresolved": unresolved,
             "note": note.to_string(),
         }),
-        DeployEvent::Done(manifest) => serde_json::json!({
-            "event": "done",
-            "network": manifest.network.label,
-            "admin": manifest.admin.to_string(),
-            "pool": manifest.pool.to_string(),
-            "comet": manifest.comet.to_string(),
-            "emitter": manifest.emitter.to_string(),
-            "backstop": manifest.backstop.to_string(),
-            "factory": manifest.factory.to_string(),
-            "deploy_ledger": manifest.deploy_ledger,
-        }),
+        DeployEvent::Done(manifest) => {
+            let mut done = serde_json::json!({
+                "event": "done",
+                "network": manifest.network.label,
+                "admin": manifest.admin.to_string(),
+                "pool": manifest.pool.to_string(),
+                "comet": manifest.comet.to_string(),
+                "emitter": manifest.emitter.to_string(),
+                "backstop": manifest.backstop.to_string(),
+                "factory": manifest.factory.to_string(),
+                "deploy_ledger": manifest.deploy_ledger,
+            });
+            // A run that handed the market over names, in the same event that
+            // reports its completion, the signatures the network is still
+            // waiting for — so a CI job that sees `done` can tell its curator
+            // what to sign without reading the journal. A run that owed no
+            // handoff carries no `handoff` key at all, which is what a run of
+            // this tool before curators looked like on the wire.
+            if let Some(handoff) = handoff {
+                done["handoff"] = handoff.clone();
+            }
+            done
+        }
         DeployEvent::Failed(reason) => serde_json::json!({
             "event": "failed",
             "reason": reason.to_string(),
@@ -2252,6 +2320,7 @@ mod tests {
                 "the confirmed step reported a violation",
             )),
             &[Safe::literal("no Accepted price")],
+            None,
         );
         assert_eq!(event["event"], "failed");
         assert_eq!(

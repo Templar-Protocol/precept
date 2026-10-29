@@ -3885,6 +3885,27 @@ fn xdr_u32(b64: &str) -> Option<u32> {
     Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
+/// Whether a base64 XDR value the caller constructed is the bytes the network
+/// stored. Decoded bytes are compared, never the base64 text: the two sides
+/// reach the caller through different renderings of the same encoder, and
+/// text equality would make a stored entry look absent for a reason that has
+/// nothing to do with the ledger.
+pub fn xdr_entry_matches(encoded: &str, stored: &str) -> bool {
+    matches!((base64_decode(encoded), base64_decode(stored)), (Some(want), Some(found)) if want == found)
+}
+
+/// The trailing XDR `u32` of a stored value whose every earlier byte is the
+/// caller's encoding: a `(.., u32)` tuple whose last field is a deadline only
+/// the network knows. `None` when anything before it differs.
+pub fn xdr_entry_tail_u32(encoded: &str, stored: &str) -> Option<u32> {
+    let (want, found) = (base64_decode(encoded)?, base64_decode(stored)?);
+    let cut = found.len().checked_sub(4)?;
+    if want.len() != found.len() || want[..cut] != found[..cut] {
+        return None;
+    }
+    Some(u32::from_be_bytes([found[cut], found[cut + 1], found[cut + 2], found[cut + 3]]))
+}
+
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let encoded = input.trim_end_matches('=');

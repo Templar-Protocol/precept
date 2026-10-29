@@ -1,7 +1,7 @@
 name: registry
 # The in-git deployment registry (registry/) is read by the frontend straight
-# from this repo and written by curators via PRs and by the precept-internal
-# deploy tooling via registry/registry.py. Every PR runs the offline suite
+# from this repo and written by curators via PRs and by the deployer in
+# tools/abtest via registry/registry.py. Every PR runs the offline suite
 # (unit tests + schema/canonical-order `check`); PRs that touch registry/**
 # additionally verify it against live chain state, as does any push to main
 # that changes it.
@@ -33,7 +33,9 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Unit tests
-        run: python3 -m unittest discover -s registry -v
+        run: |
+          python3 -m unittest discover -s registry -v
+          python3 -m unittest scripts/test_pool_deploy_ci.py -v
       - name: Registry check
         run: python3 registry/registry.py check
 

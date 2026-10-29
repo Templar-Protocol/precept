@@ -21,8 +21,8 @@ use crate::manifest::{MARKET_BASE, MARKET_SOURCE_RESOLUTION};
 use crate::market::{custody_payload_digest, sha256_hex};
 use crate::scenario::{req, Req, E6, E9, I128_MAX, SCALAR_7};
 use crate::stellar::{
-    AccountId, Capture, CmdOutput, ContractId, Executor, Invocation, Net, Policy, RealExecutor,
-    Safe, Stellar, WasmHash, MARKET_CAPTURE_STDERR_CAP, MARKET_CAPTURE_STDOUT_CAP,
+    AccountId, Capture, CmdOutput, ContractId, Executor, Invocation, Net, Policy, RawKey,
+    RealExecutor, Safe, Stellar, WasmHash, MARKET_CAPTURE_STDERR_CAP, MARKET_CAPTURE_STDOUT_CAP,
     MARKET_MUTATION_WALL, MARKET_READ_WALL,
 };
 use serde_json::Value;
@@ -1590,6 +1590,32 @@ pub(crate) enum MOp {
     RealSetStatus {
         to: u32,
     },
+    /// Phase 11. `propose_admin(pool.admin)`: the pool's admin is held by the
+    /// operator until its final admin accepts. Two-step, so this coordinate
+    /// settles on the pool's temporary `PropAdmin` entry, not on `get_admin`.
+    RealHandoffPool,
+    /// Phase 11. `transfer_ownership(oracle.admin, live_until_ledger)` on one
+    /// Lazer source this run deployed. Two-step; the deadline is frozen into
+    /// this coordinate's own custody record at its gate, so a resume asks
+    /// about the transfer this run actually proposed.
+    RealHandoffLazer {
+        instance: usize,
+    },
+    /// Phase 11, one half of a governance `SetRole` handover: the proposal.
+    /// `grant` is the third element of the operation — `true` puts the
+    /// oracle admin in `Admin`, `false` takes the operator out of it.
+    RealProposeRole {
+        grant: bool,
+    },
+    /// Phase 11, the execution of the proposal its `RealProposeRole` twin
+    /// created. Its id comes from that coordinate's settled facts, exactly as
+    /// an asset configuration's does.
+    RealExecuteRole {
+        grant: bool,
+    },
+    /// Phase 11, last. `set_controller(pool.admin)`: one step, so the
+    /// readback is the controller the Comet reports.
+    RealHandoffComet,
 }
 
 /// The create2 salt role each deterministically deployed market contract is
@@ -1641,6 +1667,12 @@ pub(crate) fn market_salt_role(op: &MOp) -> Option<u32> {
 /// `market_salt_role`, which the collision test below covers.
 pub(crate) const COMET_CLAIM_ROLE: u32 = 280;
 pub(crate) const COMET_CLAIM_ATTEMPTS: u32 = 3;
+
+/// How long a two-step ownership transfer this run proposes stays acceptable:
+/// ten days of ledgers, the same bound the pool puts on its own admin
+/// proposal (pool/src/storage.rs `set_proposed_admin`), so a curator signs one
+/// deadline for a whole launch rather than one per contract.
+pub(crate) const HANDOFF_TTL_LEDGERS: u32 = 172_800;
 
 /// The `(nonce, role, side)` triples one graph consumes for one nonce. The
 /// graph is passed in because a run's graph is the one it froze, not the
@@ -1994,6 +2026,45 @@ pub(crate) fn lazer_instances(
         .enumerate()
 }
 
+/// The role transfers one run owes at the end of its graph, and the only
+/// fact about them that is not config: whether anyone is owed anything at all.
+///
+/// Why this is decided when the graph is built rather than when phase 11 runs:
+/// the frozen plan records the exact slot list a run executes and every resume
+/// must reproduce it, so a coordinate cannot be discovered to be needed partway
+/// through. Its inputs are the configuration's two final admins and the
+/// operator's own public key — the same keystore read preflight performs, and
+/// the same address the plan already binds as `admin` and refuses a resume
+/// over. Nothing here is a chain read; the graph stays a function of the
+/// configuration and the run's own identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RealHandoff {
+    /// The pool's final admin, which is also the Comet's next controller.
+    pool_admin: String,
+    /// The receiver of this run's oracle roles: `oracle.admin`, or the pool's
+    /// final admin where the pool config names no separate one.
+    oracle_admin: String,
+}
+
+impl RealHandoff {
+    /// The roles this run owes away, or `None` when it owes none: both final
+    /// admins are the operator itself, which is every configuration written
+    /// before a curator could hold a pool, and such a run's graph stays
+    /// byte-for-byte the graph it always was.
+    fn owed(cfg: &MarketConfig, operator: Option<&str>) -> Option<Self> {
+        let pool = cfg.pool.as_ref()?;
+        let operator = operator?;
+        let oracle_admin = pool
+            .oracle_admin
+            .clone()
+            .unwrap_or_else(|| pool.admin.clone());
+        (pool.admin != operator || oracle_admin != operator).then_some(Self {
+            pool_admin: pool.admin.clone(),
+            oracle_admin,
+        })
+    }
+}
+
 /// The graph shape a real market's config implies, derived from config alone.
 /// The schedule must be frozen before the first mutation and reproduced
 /// byte-for-byte on every resume, so no field here is ever a chain read:
@@ -2020,6 +2091,9 @@ pub(crate) struct RealShape {
     /// resuming a finished run under a different activation intent is a
     /// different deployment, never a silent re-plan.
     activate: bool,
+    /// The role transfers this run owes, frozen with the schedule for the
+    /// same reason `activate` is. `None` schedules no phase-11 coordinate.
+    handoff: Option<RealHandoff>,
 }
 
 impl RealShape {
@@ -2073,6 +2147,9 @@ impl RealShape {
             deploy_runtime: pool.runtime.is_none(),
             deploy_adapter: pool.adapter.is_none(),
             activate: false,
+            // Set by the run that freezes the plan, from its own operator:
+            // a shape on its own cannot know who is signing.
+            handoff: None,
         })
     }
 
@@ -2363,6 +2440,73 @@ pub(crate) fn real_market_schedule(cfg: &MarketConfig, shape: &RealShape) -> Vec
             MOp::RealSetStatus { to: 0 },
         );
     }
+    // Phase 11: the handoff, and only for a run that owes one. Every
+    // coordinate here checks the chain before it speaks and settles on the
+    // readback, so a run resumed after a half-finished handoff, or a role
+    // the operator already holds, sends nothing. The order is the order the
+    // proposal review approved: the pool first (its admin is the last thing
+    // the operator can lose without breaking what follows), then the sources
+    // this run owns, then governance — where the operator takes its own
+    // `Admin` out last, so the deployer key keeps no power — and the
+    // backing pool's controller, which is one step and so goes last.
+    if shape.handoff.is_some() {
+        let mut next = 1u32;
+        add(
+            11,
+            next,
+            "hand off the pool",
+            MarketMutationKind::Config,
+            MOp::RealHandoffPool,
+        );
+        next += 1;
+        for instance in 0..shape.lazer_feeds.len() {
+            add(
+                11,
+                next,
+                "hand off a price source",
+                MarketMutationKind::Config,
+                MOp::RealHandoffLazer { instance },
+            );
+            next += 1;
+        }
+        // A shared runtime's governance belongs to the market that first
+        // deployed it; only a runtime of this run's own has roles to move.
+        if shape.deploy_runtime {
+            for grant in [true, false] {
+                add(
+                    11,
+                    next,
+                    if grant {
+                        "propose the oracle administrator"
+                    } else {
+                        "propose the operator's release"
+                    },
+                    MarketMutationKind::Governance,
+                    MOp::RealProposeRole { grant },
+                );
+                next += 1;
+                add(
+                    11,
+                    next,
+                    if grant {
+                        "grant the oracle administrator"
+                    } else {
+                        "release the operator's role"
+                    },
+                    MarketMutationKind::Governance,
+                    MOp::RealExecuteRole { grant },
+                );
+                next += 1;
+            }
+        }
+        add(
+            11,
+            next,
+            "hand off the backing pool",
+            MarketMutationKind::Config,
+            MOp::RealHandoffComet,
+        );
+    }
     // Phase 12: publication, after every battery has passed. The coordinate
     // is the same as the lab graph's: the resume law that reads it needs no
     // graph to find it.
@@ -2543,6 +2687,17 @@ impl MarketDeployer {
         let (shape, schedule) = if cfg.is_real() {
             let mut shape = RealShape::from_config(&cfg)?;
             shape.activate = options.activate;
+            // The handoff is decided here, with the rest of the graph, because
+            // the graph is what the plan freezes. Its only input beyond the
+            // configuration is the operator's own public key: the same keystore
+            // read `preflight` performs, and the same address the plan already
+            // binds as `admin` and refuses a resume over. It must resolve
+            // here: a guess of "no operator" would freeze a graph with no
+            // handoff and leave every role on the deploying key.
+            let operator = Stellar::new(&ctx.admin_net(), &exec, Policy::Market)
+                .keys_public_key(ctx.admin_alias())?
+                .ok_or_else(|| anyhow!("the administrator identity did not resolve to a G-address"))?;
+            shape.handoff = RealHandoff::owed(&cfg, Some(operator.as_str()));
             let schedule = real_market_schedule(&cfg, &shape);
             (Some(shape), schedule)
         } else {
@@ -2880,22 +3035,44 @@ impl MarketDeployer {
         let admin = Stellar::new(&self.ctx.admin_net(), &self.exec, Policy::Market)
             .keys_public_key(self.ctx.admin_alias())?
             .ok_or_else(|| anyhow!("the administrator identity did not resolve to a G-address"))?;
-        // The pool's admin and a shared runtime's governance are proved here,
-        // before any send. Both were once discovered at their own phase —
+        // The pool's final admins and a shared runtime's governance are proved
+        // here, before any send. Both were once discovered at their own phase —
         // the admin at the pool's coordinate, the governance after the
         // uploads, the locked issuers, the Comet initialization and the
         // backstop deposit — where a mismatch is an unrecoverable halt with
         // every XLM spent. An operator fixes a configuration, so the
         // configuration is asked first.
+        //
+        // The pool's admin is no longer asked to *be* the operator: a curator
+        // deploys a pool it is about to hand over. What is asked instead is
+        // that whoever it is handed to is on this network — a role proposed to
+        // an address that does not exist is discovered at phase 11, after
+        // every upload, deploy and deposit has been paid for, and a run cannot
+        // be resumed past it.
         if self.cfg.is_real() {
             let pool = self.pool()?;
-            anyhow::ensure!(
-                pool.admin == admin.as_str(),
-                "the pool configuration names admin {} but this run is signed by the operator {}; \
-                 the run is refused before any send",
-                pool.admin,
-                admin.as_str()
-            );
+            if let Some(handoff) = RealHandoff::owed(&self.cfg, Some(admin.as_str())) {
+                for target in [handoff.pool_admin.as_str(), handoff.oracle_admin.as_str()] {
+                    if target == admin.as_str() {
+                        continue;
+                    }
+                    // An account is proved by its ledger entry and a contract
+                    // by its code: the two ways an address can be here, each
+                    // asked the way the rest of this tool asks it.
+                    let here = if let Ok(account) = AccountId::from_str(target) {
+                        self.reader().ledger_account(account.as_str())?.is_some()
+                    } else if let Ok(contract) = ContractId::from_str(target) {
+                        st.contract_exists(&contract)
+                    } else {
+                        false
+                    };
+                    anyhow::ensure!(
+                        here,
+                        "the handoff target {target} does not exist on this network; \
+                         the run is refused before any send"
+                    );
+                }
+            }
             if let Some(configured) = pool.runtime.as_deref() {
                 let runtime = ContractId::from_str(configured)
                     .map_err(|_| anyhow!("the configured runtime address is malformed"))?;
@@ -4214,6 +4391,19 @@ impl MarketDeployer {
         })
     }
 
+    /// The ownership-transfer deadline one Lazer handoff froze into its own
+    /// custody record at its gate. Like the proposal id above, it is a fact
+    /// this run chose and no later reading can recover, so it is asked of the
+    /// frozen intent and never of the ledger.
+    fn frozen_live_until(record: &MarketCustodyRecord) -> Option<u32> {
+        record.pre_state.iter().find_map(|anchor| {
+            serde_json::from_str::<Value>(&anchor.to_string())
+                .ok()
+                .and_then(|value| value.get("pending_live_until_ledger")?.as_u64())
+                .map(|n| n as u32)
+        })
+    }
+
     /// Open the confirmation gate for one scheduled mutation. The custody
     /// record and its payload digest are computed *before* the gate is
     /// offered, so the token the operator is asked to confirm is bound to the
@@ -4306,7 +4496,7 @@ impl MarketDeployer {
                     );
                 }
             }
-            MOp::RealProposeAsset { .. } => {
+            MOp::RealProposeAsset { .. } | MOp::RealProposeRole { .. } => {
                 // A proposal's id is governance's counter at the moment this
                 // coordinate is authorized. Reading it *here*, before the
                 // send, and freezing it into the payload the token signs is
@@ -4337,6 +4527,24 @@ impl MarketDeployer {
                         .pre_state
                         .push(Safe::render_market_json(&json!({ "expected_proposal_id": id }), 256)?);
                 }
+            }
+            MOp::RealHandoffLazer { .. }
+                if Self::frozen_live_until(&record).is_none() =>
+            {
+                // The mirror of the frozen proposal id, for the one handoff
+                // whose proof is a value with a deadline in it. The deadline
+                // is the curator's, but it is *this* coordinate's own reading
+                // of the ledger that sets it, and freezing it here is what
+                // lets a resume tell "the transfer I proposed is waiting for
+                // its new owner" from "someone else's transfer is" — the
+                // temporary entry names both an address and a ledger, and an
+                // address alone would not distinguish them.
+                let now = self.operator_reader().latest_ledger()?;
+                let live_until_ledger = now.saturating_add(HANDOFF_TTL_LEDGERS);
+                record.pre_state.push(Safe::render_market_json(
+                    &json!({ "pending_live_until_ledger": live_until_ledger }),
+                    256,
+                )?);
             }
             _ => {}
         }
@@ -5627,15 +5835,12 @@ impl MarketDeployer {
                     .as_ref()
                     .ok_or_else(|| anyhow!("the operator is unresolved"))?
                     .clone();
-                // Until the handover, the key that deploys a pool *is* its
-                // admin. A configuration reviewed for a different admin than
-                // the operator running it is refused here, at the point where
-                // the difference would otherwise become a pool nobody can
-                // administer.
-                anyhow::ensure!(
-                    pool.admin == admin.as_str(),
-                    "the pool configuration's admin is not the operator this run is signed by"
-                );
+                // The key that deploys a pool *is* its admin until the
+                // handover, so the factory is always asked for the operator's
+                // own address here — never the configuration's final admin,
+                // which the pool's handoff coordinate proposes later. The
+                // configuration's admin is checked at preflight, where a
+                // missing one costs nothing.
                 let oracle = self.deployed_id("adapter")?;
                 let st = self.operator_st(record)?;
                 let returned = must_ok(
@@ -5951,6 +6156,357 @@ impl MarketDeployer {
                     json!({"phase": slot.phase, "slot": slot.slot}),
                 )
             }
+            // ---- phase 11: the handoff ----
+            //
+            // Each of these asks the chain before it speaks, submits only in
+            // the one state where the role has not yet moved, and refuses on
+            // a readback that does not show the move. A coordinate whose
+            // target is the operator settles as a read-only check: a role
+            // cannot be handed to the key that already holds it, and a run
+            // that submitted anyway would pay a fee to change nothing.
+            MOp::RealHandoffPool => {
+                let pool = self.deployed_id("pool")?;
+                let handoff = self.handoff()?.clone();
+                let admin = self
+                    .progress
+                    .admin
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("the operator is unresolved"))?
+                    .clone();
+                let reader = self.operator_reader();
+                let already = reader
+                    .view(pool.as_str(), self.ctx.admin_alias(), "get_admin", &[])
+                    .ok()
+                    .and_then(|current| current.as_str().map(str::to_string))
+                    .is_some_and(|current| current == handoff.pool_admin);
+                if admin.as_str() == handoff.pool_admin || already {
+                    return read_only(
+                        "the pool's admin is already the address this run was told to hand it to; nothing was proposed",
+                        Some(pool),
+                        json!({"phase": slot.phase, "slot": slot.slot,
+                               "pool_admin": handoff.pool_admin}),
+                    );
+                }
+                // A proposal this run already made is not a second proposal:
+                // the pool keeps one proposed admin and stamps it with an
+                // expiry, so asking again moves a deadline no one asked to
+                // move. The temporary entry is the only proof a proposal is
+                // open, because no getter reports one.
+                if self.pool_proposes_admin(&pool, &handoff.pool_admin)? {
+                    return read_only(
+                        "the pool already names this run's proposed admin; the curator's acceptance is what remains",
+                        Some(pool.clone()),
+                        json!({"phase": slot.phase, "slot": slot.slot,
+                               "accept": {"contract": pool.as_str(), "method": "accept_admin",
+                                          "by": handoff.pool_admin}}),
+                    );
+                }
+                let st = self.operator_st(record)?;
+                must_ok(
+                    st.invoke(
+                        pool.as_str(),
+                        self.ctx.admin_alias(),
+                        "propose_admin",
+                        &[kv("new_admin", handoff.pool_admin.as_str())],
+                    )?,
+                    "pool admin proposal",
+                )?;
+                anyhow::ensure!(
+                    self.pool_proposes_admin(&pool, &handoff.pool_admin)?,
+                    "the pool does not report this run's proposed admin; the proposal is not on the ledger"
+                );
+                step(
+                    "the pool holds a proposal naming its final admin, which that admin accepts within ten days",
+                    Some(pool.clone()),
+                    json!({"phase": slot.phase, "slot": slot.slot,
+                           "accept": {"contract": pool.as_str(), "method": "accept_admin",
+                                      "by": handoff.pool_admin}}),
+                )
+            }
+            MOp::RealHandoffLazer { instance } => {
+                let source = self.deployed_id(&format!("lazer:{instance}"))?;
+                let handoff = self.handoff()?.clone();
+                let admin = self
+                    .progress
+                    .admin
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("the operator is unresolved"))?
+                    .clone();
+                let reader = self.operator_reader();
+                let already = reader
+                    .view(source.as_str(), self.ctx.admin_alias(), "get_owner", &[])
+                    .ok()
+                    .and_then(|owner| owner.as_str().map(str::to_string))
+                    .is_some_and(|owner| owner == handoff.oracle_admin);
+                if admin.as_str() == handoff.oracle_admin || already {
+                    return read_only(
+                        "this source's owner is already the address this run was told to hand it to; nothing was proposed",
+                        Some(source),
+                        json!({"phase": slot.phase, "slot": slot.slot,
+                               "oracle_admin": handoff.oracle_admin}),
+                    );
+                }
+                // The deadline is the one this coordinate froze at its own
+                // gate, never a fresh reading of the ledger: an entry that
+                // matches it is this run's own proposal, and one that matches
+                // everything except it is someone else's business.
+                let live_until_ledger = Self::frozen_live_until(record).ok_or_else(|| {
+                    anyhow!("this handoff froze no ownership deadline at its gate")
+                })?;
+                if self
+                    .lazer_proposes_owner(&source, &handoff.oracle_admin, live_until_ledger)?
+                {
+                    return read_only(
+                        "this source already holds this run's pending ownership transfer; the curator's acceptance is what remains",
+                        Some(source.clone()),
+                        json!({"phase": slot.phase, "slot": slot.slot,
+                               "accept": {"contract": source.as_str(), "method": "accept_ownership",
+                                          "by": handoff.oracle_admin,
+                                          "before_ledger": live_until_ledger}}),
+                    );
+                }
+                let st = self.operator_st(record)?;
+                must_ok(
+                    st.invoke(
+                        source.as_str(),
+                        self.ctx.admin_alias(),
+                        "transfer_ownership",
+                        &[
+                            kv("new_owner", handoff.oracle_admin.as_str()),
+                            kv("live_until_ledger", live_until_ledger),
+                        ],
+                    )?,
+                    "source ownership transfer",
+                )?;
+                anyhow::ensure!(
+                    self.lazer_proposes_owner(&source, &handoff.oracle_admin, live_until_ledger)?,
+                    "the source does not report this run's pending ownership transfer"
+                );
+                step(
+                    "the source holds a transfer of ownership to the oracle administrator, acceptable before its deadline",
+                    Some(source.clone()),
+                    json!({"phase": slot.phase, "slot": slot.slot,
+                           "accept": {"contract": source.as_str(), "method": "accept_ownership",
+                                      "by": handoff.oracle_admin,
+                                      "before_ledger": live_until_ledger}}),
+                )
+            }
+            MOp::RealProposeRole { grant } | MOp::RealExecuteRole { grant } => {
+                // One half of the governance handover is one proposal, exactly
+                // as one asset's price law is: a grant and a release executed
+                // as a unit would leave the runtime with two administrators or
+                // none if the second call were lost.
+                let governance = self.deployed_id("proxy-governance")?;
+                let admin = self
+                    .progress
+                    .admin
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("the operator is unresolved"))?
+                    .clone();
+                let proposing = matches!(&slot.op, MOp::RealProposeRole { .. });
+                // The account whose role moves, and the state that settles
+                // this half: the grant is settled when the oracle
+                // administrator holds `Admin`, the release when the operator
+                // no longer does.
+                let (account, want) = self.role_pair(*grant)?;
+                // The pair is skipped on who *receives* the role, never on
+                // whose role moves: the release half always moves the
+                // operator's own role, so asking about `account` there would
+                // skip every release and leave the deployer an administrator.
+                if self.handoff()?.oracle_admin == admin.as_str() {
+                    // Both halves of the pair are skipped together, and this
+                    // is the one case where skipping them is right rather
+                    // than lazy: the operator *is* this run's oracle
+                    // administrator, so there is no power to move, and taking
+                    // the operator's `Admin` away would leave the runtime this
+                    // market depends on with no administrator at all.
+                    return read_only(
+                        "the operator is this run's own oracle administrator, so its governance roles need no transfer",
+                        Some(governance),
+                        json!({"phase": slot.phase, "slot": slot.slot, "grant": grant}),
+                    );
+                }
+                if self.holds_admin(&governance, &account)? == want {
+                    return read_only(
+                        if *grant {
+                            "the oracle administrator already holds the administrator role; nothing was proposed"
+                        } else {
+                            "the operator already holds no administrator role; nothing was proposed"
+                        },
+                        Some(governance),
+                        json!({"phase": slot.phase, "slot": slot.slot, "grant": grant}),
+                    );
+                }
+                let operation = self.real_set_role_operation(&account, *grant);
+                let id = if proposing {
+                    Self::frozen_proposal_id(record).ok_or_else(|| {
+                        anyhow!(
+                            "this propose coordinate froze no proposal id at its gate; \
+                             it refuses to submit a proposal it cannot name"
+                        )
+                    })?
+                } else {
+                    let propose_slot = self
+                        .schedule_owned()
+                        .into_iter()
+                        .find(|s| matches!(&s.op, MOp::RealProposeRole { grant: g } if *g == *grant))
+                        .ok_or_else(|| {
+                            anyhow!("the frozen graph has no propose coordinate for this role change")
+                        })?;
+                    let id = self
+                        .settled_facts(propose_slot.phase, propose_slot.slot)?
+                        .and_then(|facts| {
+                            facts.get("proposal").and_then(|value| match value {
+                                Value::String(text) => text.parse::<u64>().ok(),
+                                other => other.as_u64(),
+                            })
+                        })
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "the propose coordinate of this role change recorded no proposal id; \
+                                 the execution refuses rather than guess one"
+                            )
+                        })?;
+                    let stored = self.operator_reader().view(
+                        governance.as_str(),
+                        self.ctx.admin_alias(),
+                        "get_proposal",
+                        &[kv("id", id.to_string())],
+                    )?;
+                    anyhow::ensure!(
+                        stored.get("operation") == Some(&operation),
+                        "the recorded proposal is absent or is another run's role change; \
+                         the execution refuses before submitting"
+                    );
+                    id
+                };
+                if proposing && *grant {
+                    // The only refusal in the handover, and the one that must
+                    // happen before anything is proposed: a deployer key that
+                    // holds a role beyond `Admin` is holding something this
+                    // graph never gave it and this graph will not take away,
+                    // and a run that quietly left it there would report a
+                    // deployer that keeps no power while it keeps some.
+                    let held = self.governance_roles(&governance, admin.as_str())?;
+                    anyhow::ensure!(
+                        held.iter().all(|role| role == "Admin"),
+                        "the operator holds {} beyond the administrator role; \
+                         the handoff refuses rather than leave an unaccounted role behind",
+                        held.iter()
+                            .filter(|role| *role != "Admin")
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                let st = self.operator_st(record)?;
+                if proposing {
+                    must_ok(
+                        st.invoke(
+                            governance.as_str(),
+                            self.ctx.admin_alias(),
+                            "create_proposal",
+                            &[
+                                kv("caller", admin.as_str()),
+                                kv("id", id.to_string()),
+                                kv("operation", operation.to_string()),
+                                kv("requested_ttl", "0"),
+                            ],
+                        )?,
+                        "create_proposal",
+                    )?;
+                    return step(
+                        "governance holds the proposal that moves this administrator role",
+                        Some(governance),
+                        json!({"phase": slot.phase, "slot": slot.slot, "grant": grant,
+                               "proposal": id.to_string()}),
+                    );
+                }
+                must_ok(
+                    st.invoke(
+                        governance.as_str(),
+                        self.ctx.admin_alias(),
+                        "execute_proposal",
+                        &[kv("caller", admin.as_str()), kv("id", id.to_string())],
+                    )?,
+                    "execute_proposal",
+                )?;
+                anyhow::ensure!(
+                    self.holds_admin(&governance, &account)? == want,
+                    "governance did not read back the role change this execution submitted"
+                );
+                if !*grant {
+                    // The deployer's own proof, asked separately from the
+                    // single-role read above because it is a different claim:
+                    // not that one role is gone, but that nothing is left.
+                    let held = self.governance_roles(&governance, admin.as_str())?;
+                    anyhow::ensure!(
+                        held.is_empty(),
+                        "the operator still holds roles on this governance: {}",
+                        held.join(", ")
+                    );
+                }
+                step(
+                    if *grant {
+                        "the oracle administrator holds the administrator role this run was deployed to hand over"
+                    } else {
+                        "the operator holds no role of this governance: the deployer key keeps no power"
+                    },
+                    Some(governance),
+                    json!({"phase": slot.phase, "slot": slot.slot, "grant": grant,
+                           "proposal": id.to_string()}),
+                )
+            }
+            MOp::RealHandoffComet => {
+                let comet = self.deployed_id("comet")?;
+                let handoff = self.handoff()?.clone();
+                let admin = self
+                    .progress
+                    .admin
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("the operator is unresolved"))?
+                    .clone();
+                let reader = self.operator_reader();
+                let controller = reader
+                    .view(comet.as_str(), self.ctx.admin_alias(), "get_controller", &[])
+                    .ok()
+                    .and_then(|current| current.as_str().map(str::to_string));
+                if admin.as_str() == handoff.pool_admin || controller.as_deref()
+                    == Some(handoff.pool_admin.as_str())
+                {
+                    return read_only(
+                        "the backing pool's controller is already the pool's final admin; nothing was submitted",
+                        Some(comet),
+                        json!({"phase": slot.phase, "slot": slot.slot}),
+                    );
+                }
+                // Last, and one step: `set_controller` takes effect the way the
+                // pool's admin proposal does not, so it goes after every
+                // coordinate that still needs the operator's authority.
+                let st = self.operator_st(record)?;
+                must_ok(
+                    st.invoke(
+                        comet.as_str(),
+                        self.ctx.admin_alias(),
+                        "set_controller",
+                        &[kv("manager", handoff.pool_admin.as_str())],
+                    )?,
+                    "backing pool controller",
+                )?;
+                anyhow::ensure!(
+                    self.operator_reader()
+                        .view(comet.as_str(), self.ctx.admin_alias(), "get_controller", &[])
+                        .ok()
+                        .and_then(|current| current.as_str().map(str::to_string))
+                        .is_some_and(|current| current == handoff.pool_admin),
+                    "the backing pool did not read back the controller this run asked for"
+                );
+                step(
+                    "the backing pool's controller is the pool's final admin",
+                    Some(comet),
+                    json!({"phase": slot.phase, "slot": slot.slot}),
+                )
+            }
             // Shared with the lab graph: publication assembles from settled
             // facts and sends nothing to a chain.
             MOp::Publish => Ok(None),
@@ -5958,6 +6514,131 @@ impl MarketDeployer {
                 "a real market's graph scheduled an operation neither of its two halves handles"
             )),
         }
+    }
+
+    /// The role transfers this run's frozen graph owes, or a refusal naming
+    /// that it scheduled none. Every phase-11 coordinate asks this before it
+    /// asks the chain, so a coordinate reached by a graph that owes nothing
+    /// cannot act on an invented target.
+    fn handoff(&self) -> anyhow::Result<&RealHandoff> {
+        self.shape
+            .as_ref()
+            .and_then(|shape| shape.handoff.as_ref())
+            .ok_or_else(|| anyhow!("this run's graph scheduled no handoff, so it has no role to hand over"))
+    }
+
+    /// The account whose governance role one handover coordinate moves, and
+    /// whether the role is expected to be held afterwards. The grant moves the
+    /// oracle administrator into `Admin`; the release moves the operator out of
+    /// it — the two halves of one transfer, stated once so the execution and
+    /// its reconciliation cannot disagree about who they are about to ask for.
+    fn role_pair(&self, grant: bool) -> anyhow::Result<(String, bool)> {
+        let handoff = self.handoff()?;
+        if grant {
+            Ok((handoff.oracle_admin.clone(), true))
+        } else {
+            let operator = self.progress.admin.as_ref().ok_or_else(|| anyhow!("the operator is unresolved"))?;
+            Ok((operator.as_str().to_string(), false))
+        }
+    }
+
+    /// The governance operation one role-handover coordinate proposes: the
+    /// same `GovernanceAction::SetRole` a manual grant is made with, named by
+    /// the account whose role moves and by whether it is being given or taken.
+    fn real_set_role_operation(&self, account: &str, grant: bool) -> Value {
+        json!({ "SetRole": [account, "Admin", grant] })
+    }
+
+    /// Whether governance reports that one account holds `Admin`. A read that
+    /// fails or answers nothing is an error, never "does not hold": the
+    /// release half settles on "does not hold", so a failed read reported as
+    /// false would end the run saying the deployer keeps no power while it
+    /// still administers the runtime.
+    fn holds_admin(&self, governance: &ContractId, account: &str) -> anyhow::Result<bool> {
+        self.operator_reader()
+            .view(
+                governance.as_str(),
+                self.ctx.admin_alias(),
+                "has_role",
+                &[kv("account", account), kv("role", "Admin")],
+            )?
+            .as_bool()
+            .ok_or_else(|| anyhow!("governance answered has_role with something other than a boolean"))
+    }
+
+    /// Every role governance reports for one account. `get_roles` answers a
+    /// vector of the contract's own `Role` enum, which the CLI renders either
+    /// as its name or as a single-key object; both are read here, and only a
+    /// response that is not a vector at all is refused — a role this tool
+    /// cannot enumerate is a role it must not assume it has seen.
+    fn governance_roles(&self, governance: &ContractId, account: &str) -> anyhow::Result<Vec<String>> {
+        let roles = self.operator_reader().view(
+            governance.as_str(),
+            self.ctx.admin_alias(),
+            "get_roles",
+            &[kv("account", account)],
+        )?;
+        let entries = roles
+            .as_array()
+            .ok_or_else(|| anyhow!("governance reported its roles in a shape this tool does not read"))?;
+        Ok(entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .as_str()
+                    .or_else(|| entry.as_object().and_then(|object| object.keys().next().map(String::as_str)))
+                    .map(str::to_string)
+            })
+            .collect())
+    }
+
+    /// Whether the pool's temporary `PropAdmin` entry names one address as its
+    /// proposed admin and has not expired. The entry is the `(Address, u32
+    /// expiry)` tuple `set_proposed_admin` writes (pool/src/storage.rs:165,
+    /// 293-320); the pool treats a proposal past its expiry as absent even
+    /// while anyone keeps the entry alive, so the expiry must still be ahead.
+    /// There is no getter that reports a proposal without risking a trap, so
+    /// the entry is read raw.
+    fn pool_proposes_admin(&self, pool: &ContractId, target: &str) -> anyhow::Result<bool> {
+        let reader = self.operator_reader();
+        let want = reader.xdr_encode_scval(&json!({"vec": [{"address": target}, {"u32": 0}]}))?;
+        let Some(entry) = reader.read_temp(pool.as_str(), RawKey::Symbol("PropAdmin".to_string()))?
+        else {
+            return Ok(false);
+        };
+        let Some(expiry) = crate::stellar::xdr_entry_tail_u32(want.as_str(), &entry.val) else {
+            return Ok(false);
+        };
+        Ok(expiry > reader.latest_ledger()?)
+    }
+
+    /// Whether one Lazer source's temporary `PendingOwner` entry holds exactly
+    /// this run's proposal. The key is the fieldless `OwnableStorageKey`
+    /// variant and the value the `PendingTransfer { address,
+    /// live_until_ledger }` struct it holds (stellar-access
+    /// ownable/storage.rs, role_transfer/storage.rs), which a contracttype
+    /// struct encodes as a map of symbol keys in sorted order. Nothing here
+    /// is ignored: the deadline compared is the one this coordinate froze at
+    /// its own gate.
+    fn lazer_proposes_owner(
+        &self,
+        source: &ContractId,
+        target: &str,
+        live_until_ledger: u32,
+    ) -> anyhow::Result<bool> {
+        let reader = self.operator_reader();
+        let key = reader.xdr_encode_scval(&json!({"vec": [{"symbol": "PendingOwner"}]}))?;
+        let want = reader.xdr_encode_scval(&json!({"map": [
+            {"key": {"symbol": "address"}, "val": {"address": target}},
+            {"key": {"symbol": "live_until_ledger"}, "val": {"u32": live_until_ledger}}
+        ]}))?;
+        let Some(entry) = reader.read_temp(
+            source.as_str(),
+            RawKey::Xdr(key.as_str().to_string()),
+        )? else {
+            return Ok(false);
+        };
+        Ok(crate::stellar::xdr_entry_matches(want.as_str(), &entry.val))
     }
 
     /// The `SetProxy` operation for one real asset, the configuration it
@@ -6385,6 +7066,99 @@ impl MarketDeployer {
             // Anything less leaves it unresolved rather than replayed, which
             // is the one direction this law may err in.
             MOp::RealRefreshAsset { asset } => self.refresh_accepted(*asset)?,
+            // The handoff coordinates are idempotent in the same way, so an
+            // interrupted one is reconciled against exactly the proof its own
+            // execution asks for — never a weaker guess about what the send
+            // was meant to do. Each is the same predicate, written once.
+            MOp::RealHandoffPool => {
+                let (Ok(pool), Ok(handoff)) = (self.deployed_id("pool"), self.handoff()) else {
+                    return Ok(false);
+                };
+                self.operator_reader()
+                    .view(pool.as_str(), self.ctx.admin_alias(), "get_admin", &[])
+                    .ok()
+                    .and_then(|current| current.as_str().map(str::to_string))
+                    .is_some_and(|current| current == handoff.pool_admin)
+                    || self.pool_proposes_admin(&pool, &handoff.pool_admin)?
+            }
+            MOp::RealHandoffLazer { instance } => {
+                let (Ok(source), Ok(handoff)) = (
+                    self.deployed_id(&format!("lazer:{instance}")),
+                    self.handoff(),
+                ) else {
+                    return Ok(false);
+                };
+                // Without the deadline this coordinate froze there is no way
+                // to tell its own transfer from anyone else's, so the intent
+                // stays unresolved rather than settled on an address alone.
+                let Some(live_until_ledger) = Self::frozen_live_until(record) else {
+                    return Ok(false);
+                };
+                self.operator_reader()
+                    .view(source.as_str(), self.ctx.admin_alias(), "get_owner", &[])
+                    .ok()
+                    .and_then(|owner| owner.as_str().map(str::to_string))
+                    .is_some_and(|owner| owner == handoff.oracle_admin)
+                    || self
+                        .lazer_proposes_owner(&source, &handoff.oracle_admin, live_until_ledger)?
+            }
+            MOp::RealProposeRole { grant } => {
+                let (Ok(governance), Ok((account, want)), Ok(handoff), Some(operator)) = (
+                    self.deployed_id("proxy-governance"),
+                    self.role_pair(*grant),
+                    self.handoff(),
+                    self.progress.admin.as_ref(),
+                ) else {
+                    return Ok(false);
+                };
+                // The two states its execution settles on without proposing
+                // anything settle its reconciliation too: otherwise an intent
+                // opened for a step that never needed a proposal would wait
+                // forever for one. The execute half checks both again before
+                // it reads any proposal id.
+                if handoff.oracle_admin == operator.as_str()
+                    || self.holds_admin(&governance, &account)? == want
+                {
+                    return Ok(true);
+                }
+                // Otherwise the same proof its execution would leave: the
+                // governance holds exactly this operation at exactly the id
+                // this coordinate froze.
+                let Some(id) = Self::frozen_proposal_id(record) else {
+                    return Ok(false);
+                };
+                self.operator_reader()
+                    .view(
+                        governance.as_str(),
+                        self.ctx.admin_alias(),
+                        "get_proposal",
+                        &[kv("id", id.to_string())],
+                    )
+                    .ok()
+                    .is_some_and(|stored| {
+                        stored.get("operation")
+                            == Some(&self.real_set_role_operation(&account, *grant))
+                    })
+            }
+            MOp::RealExecuteRole { grant } => {
+                let (Ok(governance), Ok((account, want))) =
+                    (self.deployed_id("proxy-governance"), self.role_pair(*grant))
+                else {
+                    return Ok(false);
+                };
+                // A failed read is an error, never a settled release.
+                self.holds_admin(&governance, &account)? == want
+            }
+            MOp::RealHandoffComet => {
+                let (Ok(comet), Ok(handoff)) = (self.deployed_id("comet"), self.handoff()) else {
+                    return Ok(false);
+                };
+                self.operator_reader()
+                    .view(comet.as_str(), self.ctx.admin_alias(), "get_controller", &[])
+                    .ok()
+                    .and_then(|current| current.as_str().map(str::to_string))
+                    .is_some_and(|current| current == handoff.pool_admin)
+            }
             // A deterministic deployment carries its predicted id in the
             // frozen intent: the presence readback that settles a lab
             // deployment settles its real twin, so a process loss after the
@@ -6419,6 +7193,69 @@ impl MarketDeployer {
         })
     }
 
+    /// What a finished run's curator still has to sign.
+    ///
+    /// Reconstructed from the frozen graph, the configuration and the settled
+    /// custody records rather than carried in memory: a run that resumes after
+    /// its handoff can name the same acceptances as one that never stopped,
+    /// and a run that owed no handoff has no list to print at all. Only the
+    /// two-step transfers appear — a one-step controller change is settled the
+    /// moment it is sent, and a governance role this run executed itself needs
+    /// no signature from anyone.
+    pub fn handoff_acceptance(&self) -> Option<Value> {
+        let handoff = self.shape.as_ref()?.handoff.clone()?;
+        let mut accept = Vec::new();
+        for slot in self.schedule() {
+            // A coordinate that has not settled is not an acceptance the
+            // curator can sign yet, and a run that never finished is not a
+            // run that should be telling anyone what to sign.
+            let settled = self.journal.result(slot.phase, slot.slot).ok()?;
+            let result = settled.as_ref()?;
+            // An acceptance already performed is not owed: asked of the
+            // chain, since a resumed run settles "already accepted" and
+            // "still proposed" alike. A failed read keeps the entry — telling
+            // a curator to sign what they signed is harmless, leaving out
+            // what they owe is not.
+            let holds = |contract: &ContractId, getter: &str, who: &str| {
+                self.operator_reader()
+                    .view(contract.as_str(), self.ctx.admin_alias(), getter, &[])
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .is_some_and(|holder| holder == who)
+            };
+            match &slot.op {
+                MOp::RealHandoffPool => {
+                    let pool = self.deployed.get("pool")?;
+                    if !holds(pool, "get_admin", &handoff.pool_admin) {
+                        accept.push(json!({
+                            "contract": pool.as_str(),
+                            "method": "accept_admin",
+                            "by": handoff.pool_admin,
+                        }));
+                    }
+                }
+                MOp::RealHandoffLazer { instance } => {
+                    let source = self.deployed.get(&format!("lazer:{instance}"))?;
+                    if !holds(source, "get_owner", &handoff.oracle_admin) {
+                        accept.push(json!({
+                            "contract": source.as_str(),
+                            "method": "accept_ownership",
+                            "by": handoff.oracle_admin,
+                            // The deadline this coordinate froze for its own transfer.
+                            "before_ledger": Self::frozen_live_until(&result.custody)?,
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(json!({
+            "pool_admin": handoff.pool_admin,
+            "oracle_admin": handoff.oracle_admin,
+            "accept": accept,
+        }))
+    }
+
     /// Complete an open intent on the strength of its readback, recording the
     /// reconciliation as the answer's source so a later reader of the journal
     /// can tell a settled execution from a settled reconciliation.
@@ -6435,12 +7272,16 @@ impl MarketDeployer {
         // unable to name a proposal — a settled coordinate the run can never
         // get past.
         let mut facts = json!({"reconciled": true, "phase": phase, "slot": slot});
-        if let Some(MOp::RealProposeAsset { asset }) = op {
+        if let Some(MOp::RealProposeAsset { .. } | MOp::RealProposeRole { .. }) = op {
             let id = Self::frozen_proposal_id(record).ok_or_else(|| {
                 anyhow!("a propose intent carrying no frozen proposal id cannot be reconciled")
             })?;
             facts["proposal"] = json!(id.to_string());
-            facts["asset"] = json!(asset);
+        }
+        match op {
+            Some(MOp::RealProposeAsset { asset }) => facts["asset"] = json!(asset),
+            Some(MOp::RealProposeRole { grant }) => facts["grant"] = json!(grant),
+            _ => {}
         }
         let step = MarketStepRecord {
             phase,
@@ -6532,6 +7373,15 @@ impl MarketDeployer {
             MOp::RealDeployFactory => "factory".to_string(),
             MOp::RealDeployPool => "pool".to_string(),
             MOp::RealFreezeComet => "comet".to_string(),
+            // The handoff coordinates act on the contract whose role they
+            // move, which is the same contract a sibling coordinate of theirs
+            // already acts on.
+            MOp::RealHandoffPool => "pool".to_string(),
+            MOp::RealHandoffLazer { instance } => format!("lazer:{instance}"),
+            MOp::RealProposeRole { .. } | MOp::RealExecuteRole { .. } => {
+                "proxy-governance".to_string()
+            }
+            MOp::RealHandoffComet => "comet".to_string(),
             MOp::Mint { index } => {
                 let b = self.cfg.balances.get(*index)?;
                 format!("token:{}", b.token.as_str())
@@ -6638,7 +7488,12 @@ impl MarketDeployer {
             | MOp::RealSetReserve { .. }
             | MOp::RealBackstopDeposit
             | MOp::RealFreezeComet
-            | MOp::RealSetStatus { .. } => Err(anyhow!(
+            | MOp::RealSetStatus { .. }
+            | MOp::RealHandoffPool
+            | MOp::RealHandoffLazer { .. }
+            | MOp::RealProposeRole { .. }
+            | MOp::RealExecuteRole { .. }
+            | MOp::RealHandoffComet => Err(anyhow!(
                 "a real market's coordinate was scheduled by the lab graph",
             )),
             MOp::FundKey { who } => {
@@ -9663,6 +10518,65 @@ trust_doc() { # $1 = account, $2 = balance
 
 nothing() { printf '{"entries":[],"latestLedger":1}\n'; }
 
+# The stand-in has no XDR codec, so a stored entry is kept as the bytes that
+# identify it: the symbols and addresses its ScVal names, then its u32 as
+# exactly four bytes. Two entries that name different addresses therefore
+# differ in their bytes, and two that name the same address and differ only
+# in an expiry differ only in those last four — which is exactly the property
+# a caller that ignores the expiry relies on. Values are padded to whole
+# four-byte words because a real ScVal is.
+scval_b64() { # $1 = the ScVal in the CLI's JSON spelling
+    text=$(printf '%s' "$1" | grep -o '"\(symbol\|address\)":"[^"]*"' | sed 's/.*:"//; s/"$//')
+    num=$(printf '%s' "$1" | grep -o '"u32":[0-9]*' | sed 's/.*://')
+    [ -n "$num" ] || num=0
+    esc=$(printf '\\%03o\\%03o\\%03o\\%03o' \
+        $((num >> 24 & 255)) $((num >> 16 & 255)) $((num >> 8 & 255)) $((num & 255)))
+    {
+        printf '%s' "$text"
+        printf "$esc"
+        pad=$(( (4 - $(printf '%s' "$text" | wc -c) % 4) % 4 ))
+        i=0
+        while [ "$i" -lt "$pad" ]; do printf '\000'; i=$((i + 1)); done
+    } | base64 -w0
+}
+
+# The encoding of a key given to `contract read --key` by name, which the
+# caller checks byte for byte: an ScVal Symbol is the discriminant 15, the
+# text's length, and the text padded with zeroes to a whole four-byte word.
+symbol_b64() { # $1 = the symbol's text
+    len=${#1}
+    esc=$(printf '\\%03o\\%03o\\%03o\\%03o' \
+        $((len >> 24 & 255)) $((len >> 16 & 255)) $((len >> 8 & 255)) $((len & 255)))
+    {
+        printf '\000\000\000\017'
+        printf "$esc"
+        printf '%s' "$1"
+        pad=$(( (4 - len % 4) % 4 ))
+        i=0
+        while [ "$i" -lt "$pad" ]; do printf '\000'; i=$((i + 1)); done
+    } | base64 -w0
+}
+
+temp_value() { # $1 = contract id; the entry's ScVal JSON, or empty
+    f="$S/temp-$1"
+    [ -f "$f" ] || return 0
+    scval_b64 "$(cat "$f")"
+}
+
+# The roles one account holds on one governance. A test arms
+# `hasrole-<contract>-<account>` with the role names it holds, space-separated
+# (an empty file holds none). Unarmed, the answer is the one a run may assume
+# of itself: the operator administers the governance it deployed, and nobody
+# else does — which is the state a handover is asked to change.
+roles_of() { # $1 = contract, $2 = account
+    f="$S/hasrole-$1-$2"
+    if [ -f "$f" ]; then cat "$f"; return; fi
+    if [ -f "$S/no-admin-role" ]; then return; fi
+    if [ -f "$S/key-market-admin" ] && [ "$(cat "$S/key-market-admin")" = "$2" ]; then
+        printf 'Admin'
+    fi
+}
+
 trust_path() { printf '%s/trust-%s' "$S" "$(printf '%s' "$1" | tr ':' '_')"; }
 
 case "$1 $2" in
@@ -9670,6 +10584,33 @@ case "$1 $2" in
 'ledger latest') printf '{"sequence":@LEDGER@}\n'; exit 0 ;;
 esac
 if [ "$1" = --version ]; then printf 'stellar 26.1.0 (1228cff)\n'; exit 0; fi
+
+if [ "$1" = xdr ] && [ "$2" = encode ]; then
+    eval "file=\${$#}"
+    if [ ! -f "$file" ]; then printf 'no ScVal to encode\n' >&2; exit 1; fi
+    scval_b64 "$(cat "$file")"
+    printf '\n'
+    exit 0
+fi
+
+# A temporary entry is the one thing a handoff is proved by, so the stand-in
+# keeps them: one per contract, armed as the ScVal JSON the contract would
+# have stored (`propose_admin` and `transfer_ownership` write their own). The
+# requested key is echoed back, because it is the same encoder's output the
+# caller computed, and a value that names another address simply does not
+# match.
+if [ "$1" = contract ] && [ "$2" = read ]; then
+    cid=$(arg --id "$@")
+    key=$(arg --key-xdr "$@")
+    if [ -z "$key" ]; then key=$(symbol_b64 "$(arg --key "$@")"); fi
+    val=$(temp_value "$cid")
+    if [ -z "$val" ]; then
+        printf 'no matching contract data entries were found for the specified contract id\n' >&2
+        exit 1
+    fi
+    printf '%s,%s,%s\n' "$key" "$val" "$(scval_b64 '{"u32":1}')"
+    exit 0
+fi
 
 if [ "$1" = keys ] && [ "$2" = public-key ]; then
     f="$S/key-$3"
@@ -9925,6 +10866,50 @@ if [ "$1" = contract ] && [ "$2" = invoke ]; then
     set_freeze_status)
         printf 'true\n'
         exit 0 ;;
+    propose_admin)
+        # The pool's temporary `PropAdmin` entry: the proposed address and the
+        # ledger its proposal expires at ten days out. The caller that reads it
+        # back ignores the expiry, which is why the stand-in may pick one.
+        printf '{"vec":[{"address":"%s"},{"u32":%s}]}' \
+            "$(argfn --new_admin "$@")" "$(( @LEDGER@ + 172800 ))" > "$S/temp-$cid"
+        printf 'null\n'
+        exit 0 ;;
+    accept_admin)
+        if [ -f "$S/temp-$cid" ]; then
+            sed -n 's/.*"address":"\([^"]*\)".*/\1/p' "$S/temp-$cid" > "$S/admin-$cid"
+            rm -f "$S/temp-$cid"
+        fi
+        printf 'null\n'
+        exit 0 ;;
+    transfer_ownership)
+        # The two-step transfer a source's own `accept_ownership` completes.
+        printf '{"map":[{"key":{"symbol":"address"},"val":{"address":"%s"}},{"key":{"symbol":"live_until_ledger"},"val":{"u32":%s}}]}' \
+            "$(argfn --new_owner "$@")" "$(argfn --live_until_ledger "$@")" > "$S/temp-$cid"
+        printf 'null\n'
+        exit 0 ;;
+    accept_ownership)
+        if [ -f "$S/temp-$cid" ]; then
+            sed -n 's/.*"address":"\([^"]*\)".*/\1/p' "$S/temp-$cid" > "$S/owner-$cid"
+            rm -f "$S/temp-$cid"
+        fi
+        printf 'null\n'
+        exit 0 ;;
+    set_controller)
+        printf '%s' "$(argfn --manager "$@")" > "$S/controller-$cid"
+        printf 'null\n'
+        exit 0 ;;
+    get_roles)
+        # A JSON vector of the role names, which is how the CLI renders the
+        # contract's own `Role` enum.
+        printf '['
+        first=1
+        for role in $(roles_of "$cid" "$(argfn --account "$@")"); do
+            [ "$first" = 1 ] || printf ','
+            printf '"%s"' "$role"
+            first=0
+        done
+        printf ']\n'
+        exit 0 ;;
     get_total_supply)
         printf '"1000000000"\n'
         exit 0 ;;
@@ -9970,10 +10955,15 @@ if [ "$1" = contract ] && [ "$2" = invoke ]; then
         printf '\n'
         exit 0 ;;
     has_role)
-        # The shared runtime's governance answers for the operator unless a
-        # test arms the refusal this coordinate must refuse on.
-        if [ -f "$S/no-admin-role" ]; then printf 'false\n'; exit 0; fi
-        printf 'true\n'
+        # One account's membership of one role, from the same state `get_roles`
+        # reports: the two are the same question asked two ways, and a
+        # stand-in that answered them differently would hide a whole class of
+        # handoff bugs.
+        if [ -f "$S/fail-has_role" ]; then printf 'error: unreachable\n' >&2; exit 1; fi
+        for role in $(roles_of "$cid" "$(argfn --account "$@")"); do
+            if [ "$role" = "$(argfn --role "$@")" ]; then printf 'true\n'; exit 0; fi
+        done
+        printf 'false\n'
         exit 0 ;;
     get_proposal)
         id=$(argfn --id "$@")
@@ -9987,6 +10977,40 @@ if [ "$1" = contract ] && [ "$2" = invoke ]; then
             id=$(argfn --id "$@")
             op=$(argfn --operation "$@")
             printf '{"id":%s,"ttl_ns":0,"operation":%s}' "$id" "$op" > "$S/proposal-$id"
+        else
+            # A proposal that executes changes the state it proposes. Only a
+            # `SetRole` is modelled, because it is the only operation this
+            # graph hands over; anything else is recorded and reported, which
+            # is all its own readback asks of the stand-in.
+            id=$(argfn --id "$@")
+            op=
+            if [ -f "$S/proposal-$id" ]; then op=$(cat "$S/proposal-$id"); fi
+            case "$op" in
+            *'"SetRole"'*)
+                who=$(printf '%s' "$op" | sed -n 's/.*"SetRole":\["\([^"]*\)".*/\1/p')
+                role=$(printf '%s' "$op" | sed -n 's/.*"SetRole":\["[^"]*","\([^"]*\)".*/\1/p')
+                granted=$(printf '%s' "$op" | sed -n 's/.*,\(true\|false\).*/\1/p')
+                now=$(roles_of "$cid" "$who")
+                case " $now " in
+                *" $role "*) ;;
+                *)
+                    if [ -n "$now" ]; then now="$now "; fi
+                    now="$now$role"
+                    ;;
+                esac
+                if [ "$granted" != true ]; then
+                    kept=
+                    for held in $now; do
+                        if [ "$held" != "$role" ]; then
+                            if [ -n "$kept" ]; then kept="$kept "; fi
+                            kept="$kept$held"
+                        fi
+                    done
+                    now=$kept
+                fi
+                printf '%s' "$now" > "$S/hasrole-$cid-$who"
+                ;;
+            esac
         fi
         printf 'true\n'
         exit 0 ;;
@@ -10448,6 +11472,7 @@ exit 1
             let mut shape = RealShape::from_config(&self.cfg)
                 .expect("a real configuration derives its own shape");
             shape.activate = activate;
+            shape.handoff = RealHandoff::owed(&self.cfg, Some(self.admin.as_str()));
             real_market_schedule(&self.cfg, &shape)
         }
 
@@ -10911,13 +11936,12 @@ exit 1
         market.clean();
     }
 
-    /// The pool's admin must be the operator this run signs for. A
-    /// configuration naming anyone else is refused at preflight: the
-    /// coordinate that used to discover it is the pool's own, by which point
-    /// every upload, both locked issuers, the Comet initialization and the
-    /// backstop deposit are paid for and the run cannot be resumed past it.
+    /// A handoff target that does not exist on the network is refused at
+    /// preflight: the run would only meet it in the handoff phase, by which
+    /// point every upload, both locked issuers, the Comet initialization and
+    /// the backstop deposit are paid for, and nobody could accept the roles.
     #[test]
-    fn a_pool_admin_that_is_not_the_operator_refuses_the_run_at_preflight() {
+    fn a_handoff_target_absent_from_the_network_refuses_the_run_at_preflight() {
         let mut market = a_real_market("pool-admin", false, false);
         let foreign = fixture_actor(9);
         market
@@ -10938,10 +11962,15 @@ exit 1
             market.clean();
             panic!("a pool owned by another key is a refusal, not a run: {:?}", refused.terminal);
         };
+        // The configuration's final admin is no longer asked to *be* the
+        // operator — a curator deploys a pool it is about to hand over. What
+        // preflight still refuses is a handoff to an address that is not on
+        // this network, which the run would otherwise discover at phase 11.
         let note = note.to_string();
         assert!(
-            note.contains("names admin") && note.contains(foreign.as_str()),
-            "the refusal must name the admin the configuration asked for: {note}"
+            note.contains("does not exist on this network")
+                && note.contains(foreign.as_str()),
+            "the refusal must name the handoff target it could not find: {note}"
         );
         assert!(
             read_deployment_plan(&market.out).expect("readable").is_none(),
@@ -10953,6 +11982,425 @@ exit 1
             mutating_calls(&market.calls())
         );
         market.clean();
+    }
+
+    /// A pool whose final admin is another key is a legitimate deployment:
+    /// the run deploys it and hands it over at phase 11. Only an admin that
+    /// is not on the network at all is refused, and an account is proved by
+    /// the ledger entry it has.
+    #[test]
+    fn a_pool_admin_that_exists_elsewhere_is_deployed_and_handed_over() {
+        let mut market = a_real_market("pool-admin-curated", false, false);
+        let foreign = fixture_actor(9);
+        market.arm(&format!("account-{}", foreign.as_str()), "open");
+        market
+            .cfg
+            .pool
+            .as_mut()
+            .expect("a real market has a pool")
+            .admin = foreign.as_str().to_string();
+
+        let run = market.run(false);
+        assert!(
+            run.terminal.is_none(),
+            "a pool owned by a curator that exists is a run, not a refusal: {:?}",
+            run.terminal
+        );
+        let slots = market.schedule(false);
+        assert!(
+            slots.iter().any(|slot| slot.phase == 11
+                && matches!(&slot.op, MOp::RealHandoffPool)),
+            "a pool owed to another key schedules its handoff: {slots:?}"
+        );
+        assert!(
+            slots.iter().any(|slot| slot.phase == 11
+                && matches!(&slot.op, MOp::RealHandoffComet)),
+            "the backing pool's controller follows the pool's admin: {slots:?}"
+        );
+        market.clean();
+    }
+
+    /// A configuration written before a curator could hold a pool — its admin
+    /// is the operator, and it names no oracle admin — is the graph it always
+    /// was: no phase-11 coordinate exists anywhere in it.
+    #[test]
+    fn a_pool_whose_admin_is_the_operator_schedules_no_handoff() {
+        let market = a_real_market("pool-admin-self", false, false);
+        let slots = market.schedule(false);
+        assert!(
+            !slots.iter().any(|slot| slot.phase == 11),
+            "a run that hands nothing over schedules no handoff: {slots:?}"
+        );
+        market.clean();
+    }
+
+    /// A run that owes a pool a new admin proposes it, and the proposal is
+    /// proved by the one thing the pool keeps of it: the temporary entry
+    /// naming the proposed address. Nothing settles on the invoke's word.
+    #[test]
+    fn the_pool_handoff_proposes_its_admin_and_the_readback_proves_the_proposal() {
+        let foreign = fixture_actor(9);
+        let market = a_market_owed_a_handoff("handoff-pool", &foreign);
+        let pool = fixture_contract(87);
+        let (record, ev) = confirm_through_gate(&market, &MOp::RealHandoffPool, vec![("pool", pool.clone())]);
+        assert!(
+            matches!(ev, DeployEvent::Phase { .. }),
+            "the admin proposal must settle: {ev:?}\n{}",
+            market.calls()
+        );
+        assert_eq!(record.target.as_ref(), Some(&pool));
+        let calls = market.calls();
+        assert!(
+            calls.contains(&format!("--new_admin {}", foreign.as_str())),
+            "the pool was never asked to propose this run's admin: {calls}"
+        );
+        assert!(
+            calls.contains("propose_admin") && calls.contains("PropAdmin"),
+            "the proposal is proved by the pool's own temporary entry: {calls}"
+        );
+        // The signature list belongs to a finished run and to no other: a
+        // coordinate the graph has not reached yet is not an acceptance the
+        // curator can sign, and a partial list printed as if it were the
+        // whole one would tell a driver the market is fully handed over when
+        // it is not.
+        assert!(
+            market.run(false).handoff_acceptance().is_none(),
+            "an unfinished run has no signature list to print"
+        );
+        market.clean();
+    }
+
+    /// The pool keeps one proposed admin and stamps it with the ledger its
+    /// proposal expires at. A live proposal that already names this run's
+    /// target is this run's own work: proposing again would move a deadline
+    /// nobody asked to move and re-start the curator's ten days.
+    #[test]
+    fn a_pool_that_already_proposes_this_runs_admin_proposes_it_no_again() {
+        let foreign = fixture_actor(9);
+        let market = a_market_owed_a_handoff("handoff-pool-open", &foreign);
+        let pool = fixture_contract(87);
+        // The stand-in's latest ledger is 1234567: this proposal is still live.
+        market.arm(
+            &format!("temp-{}", pool.as_str()),
+            &format!("{{\"vec\":[{{\"address\":\"{}\"}},{{\"u32\":9999999}}]}}", foreign.as_str()),
+        );
+        let (_, ev) = confirm_through_gate(&market, &MOp::RealHandoffPool, vec![("pool", pool.clone())]);
+        assert!(
+            matches!(ev, DeployEvent::Phase { .. }),
+            "an open proposal must settle as the work it is: {ev:?}\n{}",
+            market.calls()
+        );
+        let calls = market.calls();
+        assert!(
+            !calls.contains("propose_admin"),
+            "an open proposal is not a second proposal: {calls}"
+        );
+        // What the coordinate records is the signature the curator still owes,
+        // named by contract, method and signer: the same entry the finished
+        // run's list is made of, so a driver that reaches `done` can tell
+        // "deployed" from "deployed and waiting for someone else to sign".
+        let facts = market
+            .run(false)
+            .settled_facts(11, 1)
+            .expect("the handoff coordinate is settled")
+            .expect("a settled coordinate records what it settled");
+        assert_eq!(
+            facts["accept"],
+            json!({"contract": pool.as_str(), "method": "accept_admin",
+                   "by": foreign.as_str()}),
+            "the readback records whose signature is still owed: {facts}"
+        );
+        market.clean();
+    }
+
+    /// A proposal that names someone else is not this run's, however it
+    /// arrived: the handoff this configuration asked for still has to be
+    /// made, and the pool's single slot is overwritten by the address it
+    /// actually owes.
+    #[test]
+    fn a_pool_proposing_another_admin_is_still_handed_over() {
+        let foreign = fixture_actor(9);
+        let market = a_market_owed_a_handoff("handoff-pool-other", &foreign);
+        let pool = fixture_contract(87);
+        market.arm(
+            &format!("temp-{}", pool.as_str()),
+            &format!(
+                "{{\"vec\":[{{\"address\":\"{}\"}},{{\"u32\":0}}]}}",
+                fixture_actor(11).as_str()
+            ),
+        );
+        let (_, ev) = confirm_through_gate(&market, &MOp::RealHandoffPool, vec![("pool", pool)]);
+        assert!(
+            matches!(ev, DeployEvent::Phase { .. }),
+            "someone else's proposal cannot settle this run's handoff: {ev:?}\n{}",
+            market.calls()
+        );
+        assert!(
+            market.calls().contains(&format!("--new_admin {}", foreign.as_str())),
+            "the pool was left with the address this run did not ask for"
+        );
+        market.clean();
+    }
+
+    /// The two governance halves are one transfer asked twice: the oracle
+    /// administrator is left holding the administrator role, and the key that
+    /// deployed the market is left holding none. Each half is proved by what
+    /// governance reports afterwards, not by the proposal being accepted —
+    /// and the release is proved separately from the single-role read, as
+    /// "nothing is left" rather than "this one role is gone".
+    #[test]
+    fn the_governance_pair_hands_the_administrator_role_over_and_empties_the_deployer() {
+        let foreign = fixture_actor(9);
+        let market = a_market_owed_a_handoff("handoff-roles", &foreign);
+        let governance = fixture_contract(52);
+        let mut d = market.run(false);
+        market.arm_deployed(&mut d, [("proxy-governance", governance.clone())]);
+        for op in [
+            MOp::RealProposeRole { grant: true },
+            MOp::RealExecuteRole { grant: true },
+            MOp::RealProposeRole { grant: false },
+            MOp::RealExecuteRole { grant: false },
+        ] {
+            let slot = market
+                .schedule(false)
+                .into_iter()
+                .find(|s| s.op == op)
+                .unwrap_or_else(|| panic!("the handoff graph schedules no {op:?}"));
+            d.prepare_gate(&slot).expect("the handoff gate opens");
+            let token = d.gate.as_ref().expect("the gate is open").token.clone();
+            let ev = d
+                .step(DeployAct::Confirm { token })
+                .expect("the confirmed step runs");
+            assert!(
+                matches!(ev, DeployEvent::Phase { .. }),
+                "{op:?} must settle: {ev:?}\n{}",
+                market.calls()
+            );
+        }
+        // Read what governance *wrote*: an unwritten file is the fixture's
+        // default ("the operator administers"), so reading it as empty would
+        // pass a run whose release half never executed.
+        let roles = |who: &str| {
+            std::fs::read_to_string(
+                market
+                    .state
+                    .join(format!("hasrole-{}-{who}", governance.as_str())),
+            )
+            .unwrap_or_else(|_| panic!("governance never changed the roles of {who}"))
+        };
+        assert_eq!(
+            roles(foreign.as_str()),
+            "Admin",
+            "the oracle administrator was never granted the role"
+        );
+        assert_eq!(
+            roles(market.admin.as_str()),
+            "",
+            "the deployer key kept a role the graph exists to take away"
+        );
+        market.clean();
+    }
+
+    /// A role read that fails is an error, never "does not hold". The release
+    /// half settles on "the operator holds no Admin", so a failed read taken
+    /// for false would finish the run saying the deployer keeps no power
+    /// while it still administers the runtime.
+    #[test]
+    fn a_failed_role_read_never_settles_the_release() {
+        let foreign = fixture_actor(9);
+        let market = a_market_owed_a_handoff("handoff-role-read-fails", &foreign);
+        let governance = fixture_contract(52);
+        let mut d = market.run(false);
+        market.arm_deployed(&mut d, [("proxy-governance", governance)]);
+        market.arm("fail-has_role", "1");
+        let slot = market.slot(&MOp::RealProposeRole { grant: false });
+        let outcome = d.prepare_gate(&slot).and_then(|ev| match ev {
+            DeployEvent::Confirm { token, .. } => d.step(DeployAct::Confirm { token }),
+            other => Ok(other),
+        });
+        assert!(
+            !matches!(outcome, Ok(DeployEvent::Phase { .. })),
+            "a release settled on a read that never answered: {outcome:?}"
+        );
+        assert!(
+            !market.settled(&slot),
+            "the release coordinate settled without proof that the operator holds nothing"
+        );
+        market.clean();
+    }
+
+    /// An interrupted role proposal reconciled on resume keeps the proposal
+    /// id its gate froze, exactly as an asset proposal does: the execute
+    /// behind it reads the id from these facts and refuses without one.
+    #[test]
+    fn a_reconciled_role_proposal_records_its_proposal_id() {
+        let foreign = fixture_actor(9);
+        let market = a_market_owed_a_handoff("handoff-role-reconcile", &foreign);
+        market.arm("next-proposal-id", "4");
+        let op = MOp::RealProposeRole { grant: true };
+        let (slot, record, d) =
+            market.open_gate_armed(&op, [("proxy-governance", fixture_contract(52))]);
+        market
+            .journal()
+            .begin(slot.phase, slot.slot, &record)
+            .expect("the coordinate was reserved");
+        d.finish_reconciled(slot.phase, slot.slot, &record, Some(&op))
+            .expect("a frozen role proposal reconciles");
+        let facts = d
+            .settled_facts(slot.phase, slot.slot)
+            .expect("the journal is readable")
+            .expect("the coordinate settled");
+        assert_eq!(
+            facts.get("proposal").and_then(Value::as_str),
+            Some("4"),
+            "the execute behind this proposal could never name it: {facts}"
+        );
+        market.clean();
+    }
+
+    /// An open role-proposal intent whose step never needed a proposal — the
+    /// oracle administrator already holds `Admin` — reconciles on resume. The
+    /// frozen id names no proposal, and waiting for one would strand the run
+    /// in the handoff with the deploying key still an administrator.
+    #[test]
+    fn a_role_proposal_that_needed_no_proposal_reconciles() {
+        let foreign = fixture_actor(9);
+        let market = a_market_owed_a_handoff("handoff-role-already", &foreign);
+        let governance = fixture_contract(52);
+        let op = MOp::RealProposeRole { grant: true };
+        let (_, record, d) = market.open_gate_armed(&op, [("proxy-governance", governance.clone())]);
+        assert!(
+            !d.real_effect_present(&op, &record).expect("the readback answers"),
+            "nothing proposed and nothing granted yet must stay unresolved"
+        );
+        market.arm(&format!("hasrole-{}-{}", governance.as_str(), foreign.as_str()), "Admin");
+        assert!(
+            d.real_effect_present(&op, &record).expect("the readback answers"),
+            "an oracle administrator already holding Admin settles the grant's proposal"
+        );
+        market.clean();
+    }
+
+    /// The pool forgets a proposal past its expiry even while anyone keeps the
+    /// temporary entry alive, so an expired proposal naming this run's target
+    /// is not this run's handoff: it is proposed again.
+    #[test]
+    fn an_expired_proposal_for_the_target_is_proposed_again() {
+        let foreign = fixture_actor(9);
+        let market = a_market_owed_a_handoff("handoff-pool-expired", &foreign);
+        let pool = fixture_contract(87);
+        // The stand-in's latest ledger is 1234567; this proposal ended before it.
+        market.arm(
+            &format!("temp-{}", pool.as_str()),
+            &format!("{{\"vec\":[{{\"address\":\"{}\"}},{{\"u32\":1000}}]}}", foreign.as_str()),
+        );
+        let (_, ev) = confirm_through_gate(&market, &MOp::RealHandoffPool, vec![("pool", pool)]);
+        assert!(matches!(ev, DeployEvent::Phase { .. }), "{ev:?}\n{}", market.calls());
+        assert!(
+            market.calls().contains(&format!("--new_admin {}", foreign.as_str())),
+            "an expired proposal was taken for a live one: {}",
+            market.calls()
+        );
+        market.clean();
+    }
+
+    /// The backing pool's controller is the one handover with no second half
+    /// to wait for, so it is asked last — and it is asked only when the
+    /// controller is not already the address the pool belongs to.
+    #[test]
+    fn the_backing_pool_is_given_the_pools_admin_and_asked_no_again_when_it_already_has_him() {
+        let foreign = fixture_actor(9);
+
+        let market = a_market_owed_a_handoff("handoff-comet", &foreign);
+        let comet = fixture_contract(88);
+        let (_, ev) = confirm_through_gate(&market, &MOp::RealHandoffComet, vec![("comet", comet.clone())]);
+        assert!(
+            matches!(ev, DeployEvent::Phase { .. }),
+            "the controller change must settle: {ev:?}\n{}",
+            market.calls()
+        );
+        let calls = market.calls();
+        assert!(
+            calls.contains(&format!("--manager {}", foreign.as_str())),
+            "the backing pool was never given the pool's admin: {calls}"
+        );
+        market.clean();
+
+        let market = a_market_owed_a_handoff("handoff-comet-set", &foreign);
+        let comet = fixture_contract(88);
+        market.arm(
+            &format!("controller-{}", comet.as_str()),
+            foreign.as_str(),
+        );
+        let (_, ev) = confirm_through_gate(&market, &MOp::RealHandoffComet, vec![("comet", comet)]);
+        assert!(
+            matches!(ev, DeployEvent::Phase { .. }),
+            "a controller that is already right settles as the state it is: {ev:?}\n{}",
+            market.calls()
+        );
+        assert!(
+            !market.calls().contains("set_controller"),
+            "a controller nobody needed to change was changed anyway: {}",
+            market.calls()
+        );
+        market.clean();
+    }
+
+    /// A price source this run deployed goes with the pool it prices, by the
+    /// two-step the source's own `accept_ownership` completes. The deadline
+    /// this run proposed with is frozen at the gate, because the entry it is
+    /// proved by carries one and a resume has to ask about *that* transfer.
+    #[test]
+    fn a_price_source_this_run_deployed_is_handed_to_the_oracle_administrator() {
+        let foreign = fixture_actor(9);
+        let mut market = a_real_market_lazer("handoff-lazer");
+        market.arm(&format!("account-{}", foreign.as_str()), "open");
+        market
+            .cfg
+            .pool
+            .as_mut()
+            .expect("a real market has a pool")
+            .admin = foreign.as_str().to_string();
+        let source = fixture_contract(90);
+        let (record, ev) = confirm_through_gate(
+            &market,
+            &MOp::RealHandoffLazer { instance: 0 },
+            vec![("lazer:0", source.clone())],
+        );
+        assert!(
+            matches!(ev, DeployEvent::Phase { .. }),
+            "the source transfer must settle: {ev:?}\n{}",
+            market.calls()
+        );
+        assert_eq!(record.target.as_ref(), Some(&source));
+        assert!(
+            record
+                .pre_state
+                .iter()
+                .any(|noted| noted.to_string().contains("pending_live_until_ledger")),
+            "the transfer's own deadline is not part of its intent: {:?}",
+            record.pre_state
+        );
+        let calls = market.calls();
+        assert!(
+            calls.contains(&format!("--new_owner {}", foreign.as_str())),
+            "the source was never asked to transfer to the oracle administrator: {calls}"
+        );
+        market.clean();
+    }
+
+    /// A market whose pool and oracle admin belong to another key: the only
+    /// configuration that owes the phase-11 graph.
+    fn a_market_owed_a_handoff(name: &str, curator: &AccountId) -> RealMarket {
+        let mut market = a_real_market(name, false, false);
+        market.arm(&format!("account-{}", curator.as_str()), "open");
+        market
+            .cfg
+            .pool
+            .as_mut()
+            .expect("a real market has a pool")
+            .admin = curator.as_str().to_string();
+        market
     }
 
     /// The shared runtime's governance is the contract every later coordinate
@@ -12551,7 +13999,10 @@ exit 1
                 false,
             ),
         ] {
-            let market = a_real_market(&format!("deposit-{label}"), false, false);
+            // The stand-in CLI is a shell script that cannot take a run
+            // directory with spaces or quotes in it; the label is prose, the path not.
+            let dir = label.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+            let market = a_real_market(&format!("deposit-{dir}"), false, false);
             let mut d = market.run(false);
             let backstop = fixture_contract(80);
             let pool = fixture_contract(81);
