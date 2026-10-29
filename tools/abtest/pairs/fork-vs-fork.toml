@@ -7,7 +7,7 @@ oracle_wasm = "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sep-40-ora
 comet_wasm = "~/precept/comet.wasm"
 emitter_wasm = "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blend-contract-sdk-1.22.0/wasm/emitter.wasm"
 
-# Pinned stock baseline (6cf6dd1), built by `make differential` in precept (the Blend fork).
+# Side A: the fork at its default reserve parameters, built by `make differential` in precept (the Blend fork).
 [a]
 label = "fork-default"
 pool_wasm = "~/precept/target/wasm32v1-none/optimized/pool.wasm"

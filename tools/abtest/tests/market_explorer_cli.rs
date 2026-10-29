@@ -1175,6 +1175,52 @@ fn invalid_market_manifest_contract_id_rejects_before_executor_and_without_contr
     );
 }
 
+/// A mistyped `--out` must be refused without creating the run directory:
+/// every market read surface resolves the run non-creatively, so a typo
+/// never leaves an empty directory behind to be mistaken for a real run.
+#[test]
+fn market_read_surfaces_never_create_a_missing_out_directory() {
+    let h = harness("read-out-noncreating");
+    let missing = h.scratch.join("no-such-run");
+    for args in [
+        vec!["market", "contracts"],
+        vec!["market", "inspect", "source.0", "set_data"],
+        vec!["market", "attach", "watcher", &watcher_id()],
+    ] {
+        let out = Command::new(BIN)
+            .arg("--out")
+            .arg(&missing)
+            .arg("--stellar-bin")
+            .arg(&h.fake)
+            .arg("--rpc-url")
+            .arg("https://rpc.testnet.stellar.org")
+            .args(&args)
+            .env("FAKE_STELLAR_LOG", &h.log)
+            .env("FAKE_STELLAR_VERSION", V261)
+            .env("FAKE_STELLAR_SPEC", h.scratch.join("fake.spec.json"))
+            .env("FAKE_STELLAR_NETWORK_INFO", &h.network_info)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run precept-abtest");
+        assert!(
+            !out.status.success(),
+            "a missing run directory must fail {args:?}: {}",
+            output_text(&out)
+        );
+        assert!(
+            !missing.exists(),
+            "{args:?} must not create the missing run directory"
+        );
+    }
+    assert_eq!(
+        fake_log(&h),
+        "",
+        "a missing run directory must refuse before any fake executable call"
+    );
+}
+
 /// Runs the shipped binary with the fake's market read responses armed
 /// for this one test. Every response body is written inside this
 /// fixture's own scratch directory and served only in reply to the one

@@ -238,6 +238,16 @@ pub struct App {
     /// decision keys must stay locked, or a second press queues an act the
     /// NEXT gate silently consumes.
     pub pending_acts: usize,
+    /// Whether the oldest queued act was sent while the worker ran mid-step.
+    /// Such an act outlives the current moment and answers the NEXT gate, so
+    /// the automatic Continue must not queue behind it: a spare Continue that
+    /// reaches an `Ev::Halt` gate would run the runner straight past the halt.
+    /// An act sent while the worker waits at the announced gate is consumed
+    /// there and needs no such reservation.
+    pub pending_midstep: bool,
+    /// The worker is believed blocked at the last announced gate. Set by gate
+    /// events, cleared by any send.
+    pub worker_at_gate: bool,
     pub selected: usize,
     pub detail_sel: usize,
     pub follow: bool,
@@ -316,6 +326,8 @@ impl App {
             status_msg: String::new(),
             last_unknown: String::new(),
             pending_acts: 0,
+            pending_midstep: false,
+            worker_at_gate: false,
             selected: 0,
             detail_sel: 0,
             follow: true,
@@ -654,10 +666,13 @@ impl App {
 
     /// Pure state transition. Every panel is a function of what this records.
     pub fn apply(&mut self, ev: Ev) {
-        // A gate event means the worker consumed an act (or passed through
-        // with gate off): one queued action is now spent.
-        if crate::tui::is_gate(&ev) {
-            self.pending_acts = self.pending_acts.saturating_sub(1);
+        // The worker blocks exactly at the events `is_gate` names, so a gate
+        // event both locates the worker and witnesses the consumption of one
+        // queued action.
+        self.worker_at_gate = crate::tui::is_gate(&ev);
+        if self.worker_at_gate && self.pending_acts > 0 {
+            self.pending_acts -= 1;
+            self.pending_midstep = false;
         }
         match ev {
             Ev::RunStarted { plan, resumed } => {
@@ -808,7 +823,12 @@ impl App {
                 if tx.send(act).is_err() {
                     self.status_msg = "runner is gone".into();
                 } else {
+                    // An act sent while the worker runs mid-step outlives the
+                    // current moment and answers the NEXT gate; one sent while
+                    // the worker waits at the announced gate is consumed there.
+                    self.pending_midstep = !self.worker_at_gate;
                     self.pending_acts += 1;
+                    self.worker_at_gate = false;
                 }
             }
             None => {

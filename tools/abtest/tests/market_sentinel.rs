@@ -527,7 +527,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Rewrite the shipped market config for offline determinism: artifact
-/// paths become scratch fixtures with matching sha256 digests, and the
+/// paths become scratch fixtures with matching sha256 digests, release
+/// pins become the same deterministic path fixtures (a release resolves
+/// through the live catalog, which the offline contract forbids), and the
 /// placeholder administrator pin becomes this run's valid identity.
 fn market_config(dir: &Path, admin: &str) -> PathBuf {
     let raw = fs::read_to_string(concat!(
@@ -537,6 +539,7 @@ fn market_config(dir: &Path, admin: &str) -> PathBuf {
     .expect("markets/protected-testnet.toml must ship with the tool");
     let mut last: Option<PathBuf> = None;
     let mut lines: Vec<String> = Vec::new();
+    let mut rewriting_release = false;
     for line in raw.lines() {
         let t = line.trim();
         if let Some(v) = t
@@ -554,7 +557,30 @@ fn market_config(dir: &Path, admin: &str) -> PathBuf {
             }
             last = Some(dest.clone());
             lines.push(format!("path = \"{}\"", dest.display()));
+        } else if t.starts_with("version = \"") && rewriting_release {
+            // A pinned version would make the offline fixture depend on the
+            // live catalog; the path rewrite below ignores it.
+            continue;
+        } else if let Some(v) = t
+            .strip_prefix("release = \"")
+            .and_then(|s| s.strip_suffix('"'))
+        {
+            // A release-form table resolves through the live catalog —
+            // reading GH_TOKEN, running `gh auth token`, api.github.com —
+            // none of which an offline test may touch: rewrite it to the
+            // same deterministic path fixture the path form uses.
+            let name = format!("{v}.wasm");
+            let dest = dir.join(&name);
+            if !dest.exists() {
+                fs::write(&dest, format!("abtest sentinel fixture {name} bytes")).unwrap();
+            }
+            last = Some(dest.clone());
+            rewriting_release = true;
+            lines.push(format!("path = \"{}\"", dest.display()));
+            let bytes = fs::read(&dest).expect("fixture artifact");
+            lines.push(format!("sha256 = \"{}\"", sha256_hex(&bytes)));
         } else if t.starts_with("sha256 = \"") {
+            rewriting_release = false;
             let bytes = fs::read(last.as_ref().expect("path precedes sha256")).unwrap();
             lines.push(format!("sha256 = \"{}\"", sha256_hex(&bytes)));
         } else if line.contains("GAYX6R3NPJWKORXQMCZ3RJZ4O4YB4B64I2BZK6F3W6F3OJBSQKLRBUTD") {

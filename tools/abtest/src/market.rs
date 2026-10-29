@@ -834,15 +834,9 @@ impl MarketRunner {
         let runtime = self.manifest.oracle.runtime.as_str().to_string();
         let adapter = self.manifest.oracle.adapter.clone();
         let mut ok = true;
-        let probe = st.view(
-            self.manifest.pool.as_str(),
-            &source,
-            "get_status",
-            &[(
-                "user",
-                self.actor_key(Who::User).unwrap_or_default().to_string(),
-            )],
-        );
+        // The pool contract exposes `get_config` (no arguments); there is
+        // no `get_status`, so probing for one would fail every snapshot.
+        let probe = st.view(self.manifest.pool.as_str(), &source, "get_config", &[]);
         ok &= probe.is_ok();
         let assets = st.view(&runtime, &source, CONTRACT_REGISTERED_ASSETS, &[]);
         ok &= assets.is_ok();

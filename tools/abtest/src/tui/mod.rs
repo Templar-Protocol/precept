@@ -212,13 +212,15 @@ fn event_loop(
             match rx.try_recv() {
                 Ok(ev) => {
                     let gate = is_gate(&ev);
+                    // An operator act queued mid-step is in flight to the gate
+                    // this event announces: it alone must answer the gate, or a
+                    // spare automatic Continue stays queued for the gate after
+                    // — where an `Ev::Halt` would consume it and run straight
+                    // past the halt.
+                    let midstep_act_in_flight = state.pending_acts > 0 && state.pending_midstep;
                     state.apply(ev);
-                    // Auto-continue unless the operator is pausing or the run halted.
-                    if gate && !state.watching() {
-                        match &state.run {
-                            RunStatus::Paused | RunStatus::Halted(_) => {}
-                            _ => state.send(Act::Continue),
-                        }
+                    if gate {
+                        auto_gate_answer(state, midstep_act_in_flight);
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -260,6 +262,31 @@ pub(crate) fn is_gate(ev: &Ev) -> bool {
         ev,
         Ev::StepStarted { .. } | Ev::StepDone { .. } | Ev::Halt { .. } | Ev::Waiting { .. }
     )
+}
+
+/// The automatic answer for a just-announced gate, if any: the worker consumes
+/// exactly one act per gate, so it needs one only when no operator act is
+/// already in flight to this gate — such an act answers it, and an automatic
+/// Continue queued behind it would stay queued for a LATER gate, where an
+/// `Ev::Halt` would consume it and run the runner past the halt. The automatic
+/// Continue is never counted in `pending_acts`: the worker consumes it at the
+/// gate that announced it, and counting it would report a phantom in-flight
+/// action that keeps the decision keys locked forever.
+fn auto_gate_answer(state: &mut App, midstep_act_in_flight: bool) {
+    if state.watching() || midstep_act_in_flight {
+        return;
+    }
+    match &state.run {
+        RunStatus::Paused | RunStatus::Halted(_) => {}
+        _ => {
+            if let Some(tx) = &state.drive {
+                if tx.send(Act::Continue).is_err() {
+                    state.status_msg = "runner is gone".into();
+                }
+                state.worker_at_gate = false;
+            }
+        }
+    }
 }
 
 /// `Ok(false)` quits. Quitting is never signalled by an error.
@@ -352,14 +379,15 @@ fn handle_normal(state: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
         }
         KeyCode::Char('R') => {
-            if let Some(step) = state.selected_step() {
+            if state.pending_acts > 0 {
+                state.status_msg = "an action is already queued for the next gate".into();
+            } else if let Some(step) = state.selected_step() {
                 let label = step.label.clone();
-                if let Some(ls) = crate::scenario::scenarios()
-                    .into_iter()
-                    .flat_map(|s| s.steps)
-                    .find(|s| s.label == label)
-                {
-                    state.pending = Some(Pending::Rerun(Box::new(ls)));
+                // `current_step` indexes scenario and trap steps alike; a flat
+                // `scenarios()` scan misses every `trap_*` row the runner
+                // appends after each scenario.
+                if let Some(ls) = crate::scenario::current_step(&label) {
+                    state.pending = Some(Pending::Rerun(Box::new(ls.clone())));
                     state.mode = Mode::Confirm;
                 } else {
                     state.status_msg = format!("{label} is not a scenario step");
@@ -381,7 +409,13 @@ fn handle_normal(state: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             };
             state.mode = Mode::Palette;
         }
-        KeyCode::Char('p') => state.send(Act::Snapshot),
+        KeyCode::Char('p') => {
+            if state.pending_acts > 0 {
+                state.status_msg = "an action is already queued for the next gate".into();
+            } else {
+                state.send(Act::Snapshot);
+            }
+        }
         KeyCode::Char('a') => state.side = 'a',
         KeyCode::Char('b') => state.side = 'b',
         KeyCode::Char('d') => state.diff_only = !state.diff_only,
@@ -484,17 +518,23 @@ fn handle_palette(state: &mut App, key: KeyEvent) {
         KeyCode::Up => state.palette.sel = state.palette.sel.saturating_sub(1),
         KeyCode::Enter => {
             if state.palette.stage == Stage::Ready {
-                if let Some(step) = state.palette.build() {
-                    // Firing a real op takes the same confirm as a re-run: a stray
-                    // Enter must not move value.
-                    state.pending = Some(Pending::ExecOp {
-                        step: Box::new(step),
-                        sides: state.palette.sides,
-                    });
-                    state.mode = Mode::Confirm;
-                    state.status_msg = "confirm the operator step: y fires, n discards".into();
+                if state.pending_acts > 0 {
+                    // The composed step stays armed; the in-flight act must
+                    // reach its gate before another can queue behind it.
+                    state.status_msg = "an action is already queued for the next gate".into();
+                } else {
+                    if let Some(step) = state.palette.build() {
+                        // Firing a real op takes the same confirm as a re-run: a stray
+                        // Enter must not move value.
+                        state.pending = Some(Pending::ExecOp {
+                            step: Box::new(step),
+                            sides: state.palette.sides,
+                        });
+                        state.mode = Mode::Confirm;
+                        state.status_msg = "confirm the operator step: y fires, n discards".into();
+                    }
+                    state.palette = Palette::default();
                 }
-                state.palette = Palette::default();
             } else if !state.palette.accept() {
                 state.status_msg = "invalid argument: expected a number".into();
             }
@@ -638,6 +678,21 @@ pub fn main_market_deploy(deployer: MarketDeployer) -> anyhow::Result<i32> {
     let mut terminal = ratatui::init();
     let result = market_event_loop(&mut terminal, &mut state, &ev_rx, &act_tx);
     ratatui::restore();
+    // The alternate screen is gone and the final frame lived for one draw,
+    // so the terminal outcome is re-printed on the normal screen: the
+    // deployment summary (public addresses) and any failure reason. An
+    // operator left with only an exit code cannot tell what the run
+    // concluded. A quit never reaches `Done`/`Failed`, so quitting stays
+    // silent here exactly as before.
+    if state.done || state.failed.is_some() {
+        println!();
+        for line in &state.summary {
+            println!("{line}");
+        }
+        if let Some(reason) = &state.failed {
+            eprintln!("failed: {reason}");
+        }
+    }
     // Every exit route — quit included — first joins the worker. While a
     // mutating child is in flight the worker is inside `step`, which does
     // not return until the child has finished and the deployer has durably
@@ -1050,6 +1105,86 @@ mod tests {
         });
         dispatch(&mut a, press('n')).unwrap();
         assert!(matches!(rx.try_recv().unwrap(), Act::Skip));
+    }
+
+    /// `p` queues a gate action like every other decision key, so it must
+    /// refuse while another act is in flight instead of stacking a second
+    /// one behind it.
+    #[test]
+    fn snapshot_key_refuses_while_an_action_is_queued() {
+        let (mut a, rx) = driving();
+        a.worker_at_gate = false;
+        dispatch(&mut a, press('n')).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Act::Skip));
+        dispatch(&mut a, press('p')).unwrap();
+        assert!(a.status_msg.contains("queued"), "{}", a.status_msg);
+        assert!(rx.try_recv().is_err(), "p must not queue a second act");
+    }
+
+    /// An act queued mid-step answers the next gate alone: the automatic
+    /// Continue must not queue behind it, because a spare Continue that
+    /// reaches an `Ev::Halt` gate would run the runner straight past the
+    /// halt.
+    #[test]
+    fn halt_gate_is_never_answered_by_a_stale_auto_continue() {
+        let (mut a, rx) = driving();
+        a.worker_at_gate = false;
+        dispatch(&mut a, press('p')).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Act::Snapshot));
+        assert!(a.pending_acts > 0 && a.pending_midstep);
+        // The gate the act was queued for announces itself: no automatic
+        // answer may queue behind the in-flight operator act.
+        auto_gate_answer(&mut a, true);
+        assert!(rx.try_recv().is_err(), "a spare Continue must not queue");
+        // The act is spent; the NEXT gate is answered automatically again.
+        a.apply(Ev::StepStarted {
+            scenario: "lending".into(),
+            index: 3,
+            label: "repay".into(),
+        });
+        auto_gate_answer(&mut a, false);
+        assert!(matches!(rx.try_recv().unwrap(), Act::Continue));
+        assert_eq!(
+            a.pending_acts, 0,
+            "the automatic Continue is never counted as an operator act"
+        );
+    }
+
+    /// With no operator act in flight the automatic Continue flows at every
+    /// gate and stays invisible to the decision-key lock, so the keys remain
+    /// usable while the run drives itself.
+    #[test]
+    fn auto_continue_queues_uncounted_between_gates() {
+        let (mut a, rx) = driving();
+        a.apply(Ev::StepStarted {
+            scenario: "lending".into(),
+            index: 2,
+            label: "repay".into(),
+        });
+        auto_gate_answer(&mut a, false);
+        assert!(matches!(rx.try_recv().unwrap(), Act::Continue));
+        assert_eq!(
+            a.pending_acts, 0,
+            "the automatic Continue must not lock the decision keys"
+        );
+        dispatch(&mut a, press('p')).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Act::Snapshot));
+    }
+
+    /// `R` must rerun trap steps too: the runner appends `trap_*` rows after
+    /// every scenario, and a flat `scenarios()` scan cannot see them.
+    #[test]
+    fn rerun_finds_a_trap_step() {
+        let (mut a, rx) = driving();
+        a.steps.push(evidence("lending", "trap_backstop_distribute", vec![]));
+        a.selected = a.steps.len() - 1;
+        dispatch(&mut a, press('R')).unwrap();
+        assert_eq!(a.mode, Mode::Confirm, "a trap step must be rerunnable");
+        dispatch(&mut a, press('y')).unwrap();
+        match rx.try_recv().unwrap() {
+            Act::Exec { step, .. } => assert_eq!(step.label, "trap_backstop_distribute"),
+            other => panic!("expected Exec, got {other:?}"),
+        }
     }
 
     #[test]

@@ -40,10 +40,14 @@ const REGISTRY_ARTIFACT: [(&str, &str); 10] = [
 /// Where to record: `--registry`, else `PRECEPT_REGISTRY`, else the precept
 /// checkout this tool runs in. Returns (checkout or None, one log line); an
 /// unusable path is a skip, never a failure.
-pub(crate) fn locate(flag: Option<&Path>, own: &Path) -> (Option<PathBuf>, String) {
+pub(crate) fn locate(
+    flag: Option<&Path>,
+    env: Option<std::ffi::OsString>,
+    own: &Path,
+) -> (Option<PathBuf>, String) {
     let (origin, chosen) = match flag {
         Some(path) => ("--registry", path.to_path_buf()),
-        None => match std::env::var_os("PRECEPT_REGISTRY") {
+        None => match env {
             Some(value) => ("PRECEPT_REGISTRY", PathBuf::from(value)),
             None => ("this checkout", own.to_path_buf()),
         },
@@ -695,7 +699,7 @@ pub(crate) fn record_completed_market(
     let (checkout, notice) = if no_registry {
         (None, "registry: skipped; --no-registry".to_string())
     } else {
-        locate(registry, &own_checkout())
+        locate(registry, std::env::var_os("PRECEPT_REGISTRY"), &own_checkout())
     };
     announce(notice);
     let Some(checkout) = checkout else {
@@ -813,17 +817,15 @@ mod tests {
             std::fs::create_dir_all(checkout.join("registry")).unwrap();
             std::fs::write(checkout.join("registry").join("registry.py"), "").unwrap();
         }
-        std::env::set_var("PRECEPT_REGISTRY", &env);
-        let (found, notice) = locate(Some(&named), &sibling);
+        let (found, notice) = locate(Some(&named), Some(env.clone().into()), &sibling);
         assert_eq!(found.as_deref(), Some(named.as_path()));
         assert!(notice.contains("--registry"), "{notice}");
-        let (found, _) = locate(None, &sibling);
+        let (found, _) = locate(None, Some(env.clone().into()), &sibling);
         assert_eq!(found.as_deref(), Some(env.as_path()));
-        std::env::remove_var("PRECEPT_REGISTRY");
-        let (found, notice) = locate(None, &sibling);
+        let (found, notice) = locate(None, None, &sibling);
         assert_eq!(found.as_deref(), Some(sibling.as_path()));
         assert!(notice.contains("this checkout"), "{notice}");
-        let (found, notice) = locate(None, &dir.join("nowhere"));
+        let (found, notice) = locate(None, None, &dir.join("nowhere"));
         assert_eq!(found, None);
         assert!(notice.contains("skipped"), "{notice}");
         assert!(!notice.contains('\n'), "one line");

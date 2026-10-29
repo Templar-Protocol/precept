@@ -836,8 +836,9 @@ fn market_explorer_net(
     Ok((net, exec))
 }
 
-/// Read surfaces require an existing completed run, never a new directory.
-fn market_read_context(cli: &Cli) -> anyhow::Result<(PathBuf, MarketManifest, Net, RealExecutor)> {
+/// Resolve the `--out` of a read-only surface: the run directory must
+/// already exist, so a mistyped path is refused instead of created.
+fn market_read_out(cli: &Cli) -> anyhow::Result<PathBuf> {
     let chosen = cli
         .out
         .as_ref()
@@ -847,6 +848,12 @@ fn market_read_context(cli: &Cli) -> anyhow::Result<(PathBuf, MarketManifest, Ne
         .canonicalize()
         .context("market reads require an existing run directory")?;
     reject_pair_markers(&out)?;
+    Ok(out)
+}
+
+/// Read surfaces require an existing completed run, never a new directory.
+fn market_read_context(cli: &Cli) -> anyhow::Result<(PathBuf, MarketManifest, Net, RealExecutor)> {
+    let out = market_read_out(cli)?;
     // Defense in depth on the dotenv boundary: market execution already
     // runs from the controlled root, so a run-directory `.env` cannot
     // reach the CLI. A market run directory is tool-owned and nothing in
@@ -1758,7 +1765,7 @@ fn market_main(cli: &Cli, cmd: &MarketCmd) -> anyhow::Result<i32> {
             Ok(0)
         }
         MarketCmd::Contracts => {
-            let out = market_out(cli)?;
+            let out = market_read_out(cli)?;
             let manifest = MarketManifest::load(&out)
                 .context("market contracts needs a completed market run directory")?;
             market_manifest_network(&manifest)?;
@@ -1768,11 +1775,7 @@ fn market_main(cli: &Cli, cmd: &MarketCmd) -> anyhow::Result<i32> {
             Ok(0)
         }
         MarketCmd::Inspect { role, method } => {
-            let out = market_out(cli)?;
-            let manifest = MarketManifest::load(&out)
-                .context("market inspect needs a completed market run directory")?;
-            let network = market_manifest_network(&manifest)?;
-            let (net, exec) = market_explorer_net(cli, &out, network)?;
+            let (out, manifest, net, exec) = market_read_context(cli)?;
             let st = market_read_stellar(&net, &exec);
             let output = market_explorer_call(market_explorer::inspect(
                 &st,
@@ -1785,13 +1788,9 @@ fn market_main(cli: &Cli, cmd: &MarketCmd) -> anyhow::Result<i32> {
             Ok(0)
         }
         MarketCmd::Attach { role, contract_id } => {
-            let out = market_out(cli)?;
-            let manifest = MarketManifest::load(&out)
-                .context("market attach needs a completed market run directory")?;
-            let network = market_manifest_network(&manifest)?;
+            let (out, manifest, net, exec) = market_read_context(cli)?;
             let contract_id = ContractId::from_str(contract_id)
                 .map_err(|_| anyhow::anyhow!("invalid contract id"))?;
-            let (net, exec) = market_explorer_net(cli, &out, network)?;
             let st = market_read_stellar(&net, &exec);
             market_explorer_call(market_explorer::attach(
                 &st,

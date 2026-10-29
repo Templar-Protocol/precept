@@ -374,6 +374,11 @@ fn all_steps() -> Vec<LabeledStep> {
         .collect()
 }
 
+/// The stress steps `scenarios()` embeds, built once so the leaked labels are
+/// allocated a single time however often the scenario list is rebuilt.
+static DEFAULT_STRESS: std::sync::LazyLock<Vec<LabeledStep>> =
+    std::sync::LazyLock::new(|| stress_steps(9_110_008, 36));
+
 /// Deterministic pseudo-random mixed operations (seeded LCG) to stress invariants.
 pub fn stress_steps(seed: u64, n: usize) -> Vec<LabeledStep> {
     use req::*;
@@ -1036,7 +1041,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "stress",
             description: "A seeded pseudo-random mix of supplies, borrows, repays, withdrawals and reprices across every actor and reserve, with the full invariant set checked after each one. Deterministic for a given seed, so a failure reproduces exactly.",
-            steps: stress_steps(9_110_008, 36),
+            steps: DEFAULT_STRESS.clone(),
         },
         Scenario {
             name: "freeze",

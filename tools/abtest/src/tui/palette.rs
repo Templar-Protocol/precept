@@ -375,7 +375,12 @@ impl Palette {
                     match arg {
                         Arg::Prices => {
                             let parts: Vec<&str> = buf.split(',').map(str::trim).collect();
-                            if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
+                            // The step builder refuses any other length later;
+                            // rejecting here keeps the input stage open so the
+                            // operator fixes the vector immediately.
+                            if parts.len() != Tok::ORACLE_ORDER.len()
+                                || parts.iter().any(|p| p.is_empty())
+                            {
                                 return false;
                             }
                             match parts
@@ -547,6 +552,32 @@ mod tests {
         t.sel = 7; // TrapCall::PoolFlashLoan
         t.accept();
         assert_eq!(t.build().unwrap().step, Step::Trap(TrapCall::PoolFlashLoan));
+    }
+
+    /// The `set_prices` input must carry exactly `Tok::ORACLE_ORDER.len()`
+    /// prices: the step builder refuses any other length only later, while a
+    /// rejection here keeps the input stage open so the operator can fix the
+    /// vector immediately.
+    #[test]
+    fn prices_input_requires_the_full_oracle_order() {
+        let mut p = Palette {
+            query: "set_prices".into(),
+            ..Default::default()
+        };
+        p.accept(); // pick set_prices; its only argument is Arg::Prices
+        let short = vec!["1"; Tok::ORACLE_ORDER.len() - 1].join(",");
+        let long = vec!["1"; Tok::ORACLE_ORDER.len() + 1].join(",");
+        let good = vec!["1"; Tok::ORACLE_ORDER.len()].join(",");
+        p.buf = short;
+        assert!(!p.accept(), "a short price vector must be refused");
+        p.buf = long;
+        assert!(!p.accept(), "a long price vector must be refused");
+        p.buf = good;
+        assert!(p.accept(), "exactly oracle-order prices are accepted");
+        assert_eq!(
+            p.build().unwrap().step,
+            Step::SetPrices(vec![1; Tok::ORACLE_ORDER.len()])
+        );
     }
 
     #[test]

@@ -977,6 +977,11 @@ pub fn render_market(app: &MarketApp, frame: &mut Frame) {
             ])
             .split(area);
         let body: Vec<Line> = app.summary.iter().map(|l| Line::from(l.clone())).collect();
+        // A `Paragraph` paints only the cells its text covers; without a
+        // Clear, the phases, progress and custody panels show through on
+        // short summary lines. The confirmation popup clears for the same
+        // reason.
+        frame.render_widget(Clear, sum[1]);
         frame.render_widget(
             Paragraph::new(body).wrap(Wrap { trim: true }).block(
                 Block::default()
