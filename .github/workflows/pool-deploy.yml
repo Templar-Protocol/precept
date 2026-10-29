@@ -177,7 +177,7 @@ jobs:
           # intent by moving it, and a stale copy left in the bucket would
           # come back as an open intent on resume. The bucket is versioned,
           # so nothing deleted here is lost.
-          ( while sleep 5; do gcloud storage rsync --recursive --delete-unmatched-destination-objects --quiet "$STAGE/runs/$RUN" "gs://$BUCKET/$RUN/journal" || true; done ) &
+          ( while sleep 5; do gcloud storage rsync --recursive --delete-unmatched-destination-objects --exclude='run\.lock$' --quiet "$STAGE/runs/$RUN" "gs://$BUCKET/$RUN/journal" || true; done ) &
           echo "sync_pid=$!" >> "$GITHUB_OUTPUT"
           python3 scripts/pool_deploy_ci.py deploy --entry "$(cat "$STAGE/meta/entry.json")" \
             --repo "$GITHUB_REPOSITORY" --approve "$(cat "$STAGE/meta/approved-plan-sha256")" \
@@ -188,15 +188,27 @@ jobs:
       - name: Persist the journal
         if: always()
         run: |
-          kill "${{ steps.deploy.outputs.sync_pid }}" 2>/dev/null || true
-          if [ -d "$STAGE/runs/$RUN" ]; then
-            gcloud storage rsync --recursive --delete-unmatched-destination-objects "$STAGE/runs/$RUN" "gs://$BUCKET/$RUN/journal"
-          fi
           rm -rf "$RUNNER_TEMP/stellar-$RUN"
           cat "$RUNNER_TEMP/summary-$RUN.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          kill "${{ steps.deploy.outputs.sync_pid }}" 2>/dev/null || true
+          # Killing the loop leaves its in-flight gcloud running, and two
+          # rsyncs of one tree share gcloud's local state file: let it end.
+          for _ in $(seq 60); do pgrep -f 'storage rsync' >/dev/null || break; sleep 1; done
+          if [ -d "$STAGE/runs/$RUN" ]; then
+            # run.lock is the deployer's process lock, not journal; it can
+            # vanish mid-listing and has no meaning on another runner.
+            for attempt in 1 2 3; do
+              gcloud storage rsync --recursive --delete-unmatched-destination-objects --exclude='run\.lock$' \
+                "$STAGE/runs/$RUN" "gs://$BUCKET/$RUN/journal" && break
+              [ "$attempt" = 3 ] && exit 1
+              sleep 5
+            done
+          fi
 
       - name: Open the registry PR
-        if: success()
+        # On the deploy's own outcome: a bookkeeping step failing after a
+        # finished deploy must not drop its registry record.
+        if: always() && steps.deploy.outcome == 'success'
         run: |
           set -euo pipefail
           git diff --quiet -- registry/testnet.jsonl registry/mainnet.jsonl && { echo "nothing recorded"; exit 0; }
