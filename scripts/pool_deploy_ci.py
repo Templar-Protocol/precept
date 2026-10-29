@@ -256,7 +256,13 @@ def cmd_deploy(a) -> None:
     body = deploy_comment(entry, code, events)
     Path(a.summary).write_text(body)
     if entry.get("pr"):
-        upsert_comment(a.repo, entry["pr"], f"<!-- precept-pool-deploy:{entry['run']} -->", body)
+        # Best effort: the chain is the outcome, the comment only reports it.
+        # A failed comment must not turn a finished deploy red and skip its
+        # registry record; the job summary carries the same text.
+        try:
+            upsert_comment(a.repo, entry["pr"], f"<!-- precept-pool-deploy:{entry['run']} -->", body)
+        except subprocess.CalledProcessError as e:
+            print(f"::warning::could not comment on PR #{entry['pr']}: {e.stderr or e}", file=sys.stderr)
     raise SystemExit(code)
 
 

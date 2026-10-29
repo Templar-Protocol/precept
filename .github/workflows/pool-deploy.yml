@@ -7,11 +7,17 @@ name: pool-deploy
 #
 # Custody: the deployer key lives in Secret Manager and is reached through
 # GitHub OIDC -> Workload Identity Federation, only from the protected
-# `testnet`/`mainnet` environment on main (precept-internal
-# infra/market-deployer). The run directory (journal + frozen plan), the staged
-# config and the approved digest are synced to a versioned bucket, so a crashed
-# or stopped run resumes with workflow_dispatch run=<run id>; settled steps are
-# never sent again. One deploy at a time.
+# `testnet`/`mainnet` environment on main (Templar's infrastructure
+# repository). The run directory (journal + frozen plan), the staged config
+# and the approved digest are synced to a versioned bucket, so a crashed or
+# stopped run resumes with workflow_dispatch run=<run id>; settled steps are
+# never sent again.
+#
+# One deploy at a time. GitHub keeps only the newest pending run of a
+# concurrency group: if a second merge queues behind a running deploy and a
+# third arrives, the second is cancelled before it starts (nothing sent,
+# nothing in the bucket). Re-run that cancelled workflow run once the queue
+# is clear; it re-derives its configs from its own push.
 
 on:
   push:
@@ -86,6 +92,8 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          # Full history: the fresh-run step diffs the push's before..after.
+          fetch-depth: 0
           persist-credentials: false
       - uses: stellar/actions/rust-cache@97ffa3486f8d355535d989edfe78795f05ec11b6 # main as of 2026-10-23
       - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
@@ -133,6 +141,11 @@ jobs:
           name=$(jq -r .name "$STAGE/meta/entry.json")
           gcloud storage cp "gs://$BUCKET/$RUN/config.json" "$STAGE/configs/$name.json"
           gcloud storage rsync --recursive "gs://$BUCKET/$RUN/journal" "$STAGE/runs/$RUN"
+          # A run that died before its first mirror left no journal. Starting
+          # it again from nothing could re-send what it had sent, so refuse:
+          # reconcile such a run by hand against the chain.
+          test -f "$STAGE/runs/$RUN/deployment-plan.toml" \
+            || { echo "::error::gs://$BUCKET/$RUN/journal holds no frozen plan; this run cannot be resumed automatically"; exit 1; }
 
       - name: Import the deployer key
         env:
@@ -156,13 +169,15 @@ jobs:
           set -euo pipefail
           network=$(jq -r .network "$STAGE/meta/entry.json")
           if [ "$network" = mainnet ]; then rpc=${MAINNET_RPC:-https://mainnet.sorobanrpc.com}; else rpc=https://soroban-testnet.stellar.org; fi
-          # Mirror the journal every 20 s so a runner that dies mid-send
+          # Mirror the journal every 5 s so a runner that dies mid-send
           # leaves its intents in the bucket; the deployer reconciles them
-          # from the chain on resume. Deletions are mirrored too: the
-          # deployer archives a stopped intent by moving it, and a stale copy
-          # left in the bucket would come back as an open intent on resume.
-          # The bucket is versioned, so nothing deleted here is lost.
-          ( while sleep 20; do gcloud storage rsync --recursive --delete-unmatched-destination-objects --quiet "$STAGE/runs/$RUN" "gs://$BUCKET/$RUN/journal" || true; done ) &
+          # from the chain on resume. (A runner lost before the first mirror
+          # leaves nothing, and resume refuses rather than start over.)
+          # Deletions are mirrored too: the deployer archives a stopped
+          # intent by moving it, and a stale copy left in the bucket would
+          # come back as an open intent on resume. The bucket is versioned,
+          # so nothing deleted here is lost.
+          ( while sleep 5; do gcloud storage rsync --recursive --delete-unmatched-destination-objects --quiet "$STAGE/runs/$RUN" "gs://$BUCKET/$RUN/journal" || true; done ) &
           echo "sync_pid=$!" >> "$GITHUB_OUTPUT"
           python3 scripts/pool_deploy_ci.py deploy --entry "$(cat "$STAGE/meta/entry.json")" \
             --repo "$GITHUB_REPOSITORY" --approve "$(cat "$STAGE/meta/approved-plan-sha256")" \
@@ -192,8 +207,17 @@ jobs:
           git add registry/testnet.jsonl registry/mainnet.jsonl
           git commit -m "registry: $RUN deployed by pool-deploy"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
-          gh pr create --base main --head "$branch" --title "registry: $RUN deployed" \
-            --body-file "$RUNNER_TEMP/summary-$RUN.md"
+          # Opening a PR from GITHUB_TOKEN needs the repository's "allow
+          # GitHub Actions to create pull requests" setting. Without it the
+          # branch is still pushed and the summary links it; the deploy is
+          # not failed for a bookkeeping step. (A PR opened by GITHUB_TOKEN
+          # does not trigger CI: re-run its checks or push to it.)
+          if ! gh pr create --base main --head "$branch" --title "registry: $RUN deployed" \
+            --body-file "$RUNNER_TEMP/summary-$RUN.md"; then
+            url="https://github.com/$GITHUB_REPOSITORY/compare/main...$branch?expand=1"
+            echo "::warning::could not open the registry PR; open it from $url"
+            echo "Registry record pushed to \`$branch\`: [open the PR]($url)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

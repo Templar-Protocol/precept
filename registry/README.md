@@ -7,8 +7,9 @@ uploaded. The frontend reads these files straight from `main`:
     https://raw.githubusercontent.com/Templar-Protocol/precept/main/registry/testnet.jsonl
     https://raw.githubusercontent.com/Templar-Protocol/precept/main/registry/mainnet.jsonl
 
-Our deploy tooling (private `precept-internal` repository) writes the files
-through `registry/registry.py` whenever a precept checkout is available; for
+The deployer in `tools/abtest` (`precept-abtest market deploy`) writes the
+files through `registry/registry.py` when it finishes a deployment, and the
+`pool-deploy` workflow opens that record as a PR; for
 anything else, curators add deployments by PR: append your record with
 `registry/registry.py add` (it also normalizes the file for you), or edit the
 `.jsonl` directly and CI's `check` will tell you what is wrong. CI runs the
@@ -102,7 +103,7 @@ code on that network. It is deliberately not a CLI wrapper: same ledger
 entries as `stellar contract info`, no dependency to install. `check-config`
 also reads the chain, for nothing but the admins; see Configs.
 
-The precept-internal tooling emits, per deployed contract, the `contract`
+The deployer (`tools/abtest`) emits, per deployed contract, the `contract`
 record above (with `refs` filled from the deploy arguments) and, per uploaded
 code, the `wasm` record with `source` pointing at the release or commit it
 built from; it then calls `add` (with `--update` only when it intentionally
@@ -177,7 +178,8 @@ smart account. CI does the rest:
    `mainnet` environment, the same command runs with `--approve-plan
    <digest>`. The deployer re-checks the digest before every send and refuses
    a plan that changed (for example if the network moved under it); then
-   re-open the PR to get a fresh plan. A refresh step stops the run until the
+   open a new PR touching the config to get a fresh plan (a merged PR cannot
+   be re-opened, and a plan binds its PR head). A refresh step stops the run until the
    pool's price feeds are live; the comment says how to resume
    (`workflow_dispatch`, `run=<id>`); settled steps are never sent again.
 4. **Handoff.** The same run proposes the pool admin to `pool.admin`,

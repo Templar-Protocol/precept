@@ -1653,13 +1653,13 @@ struct RegistryPoolInner {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegistryOracle {
-    /// The Pyth Lazer verifier every Lazer source of this pool binds. Present
-    /// whenever any source is a Lazer instance.
     /// Who receives this run's oracle roles at handoff: governance `Admin` of a
     /// runtime the run deploys, and ownership of every Lazer source it
     /// deploys. Absent means the pool's final admin.
     #[serde(default)]
     admin: Option<String>,
+    /// The Pyth Lazer verifier every Lazer source of this pool binds. Present
+    /// whenever any source is a Lazer instance.
     #[serde(default)]
     lazer_verifier: Option<String>,
     /// An existing proxy runtime this pool shares with the pool that first

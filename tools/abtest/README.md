@@ -677,7 +677,9 @@ before anything is sent: the run would only meet it at the end.
 Nothing is handed over when both fields name the deploying key, and a config
 written before these fields existed names nothing, so those runs get the graph
 they always got, coordinate for coordinate. When something is owed, one more
-phase runs after activation, in this order: the pool's `propose_admin` to
+phase runs after the backing pool is frozen (and after activation, when
+`--activate` asked for it; without it the pool is handed over still in setup
+status 6 and activating it is the new admin's call), in this order: the pool's `propose_admin` to
 `pool.admin`, a two-step `transfer_ownership` of each Lazer source this run
 deployed to `oracle.admin`, then — when this run deployed the runtime and its
 governance — a governance proposal granting `Admin` to `oracle.admin` and a

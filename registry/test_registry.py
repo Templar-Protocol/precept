@@ -518,10 +518,18 @@ class CheckConfigTest(unittest.TestCase):
                            f"{C_ADMIN} has no contract instance on mainnet")
 
     def test_malformed_admin(self):
+        # Recorded rather than failing inside fetch: check_config turns a
+        # fetch exception into a problem line, so self.fail() there would pass.
+        calls = []
+        registry.fetch = lambda url, keys: calls.append(keys) or {}
         for bad in ("G" + "A" * 55, "X" + G_ADMIN[1:], 56 * "G"):
             errs = self.problems(("pool.admin", bad))
             self.assertProblem(errs, "not a checksum-valid G or C strkey")
-        registry.fetch = lambda url, keys: self.fail("no RPC call for a malformed admin")
+        self.assertEqual(calls, [], "a malformed admin must not be looked up on chain")
+
+    def test_missing_sources_with_a_bad_quorum_reports_instead_of_crashing(self):
+        errs = self.problems(("oracle.assets.usdc.sources", None), ("oracle.assets.usdc.min_sources", 0))
+        self.assertProblem(errs, "oracle.assets.usdc.min_sources")
 
     def test_optional_oracle_admin(self):
         self.assertEqual(self.problems(("oracle.admin", C_ADMIN)), [])

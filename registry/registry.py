@@ -546,8 +546,9 @@ def _check_oracle(cfg, labels, errs):
         at = f"oracle.assets.{name}"
         srcs = _get(errs, a, "sources", at, list)
         ms = _get(errs, a, "min_sources", at, int)
-        if ms is not None and not P["min_sources_min"] <= ms <= (len(srcs) if srcs is not None else ms):
-            errs.append(f"{at}.min_sources: {ms} outside {P['min_sources_min']}..{len(srcs)} (number of sources)")
+        top = len(srcs) if srcs is not None else ms
+        if ms is not None and not P["min_sources_min"] <= ms <= top:
+            errs.append(f"{at}.min_sources: {ms} outside {P['min_sources_min']}..{top} (number of sources)")
         _bound(errs, f"{at}.max_age_secs", _get(errs, a, "max_age_secs", at, int), P["max_age_secs_min"], P["max_age_secs_max"])
 
 

@@ -7103,15 +7103,28 @@ impl MarketDeployer {
                         .lazer_proposes_owner(&source, &handoff.oracle_admin, live_until_ledger)?
             }
             MOp::RealProposeRole { grant } => {
-                // The same proof its execution half would check for a proposal
-                // this run named: the governance holds exactly this operation
-                // at exactly the id this coordinate froze.
-                let (Some(id), Ok(governance)) =
-                    (Self::frozen_proposal_id(record), self.deployed_id("proxy-governance"))
-                else {
+                let (Ok(governance), Ok((account, want)), Ok(handoff), Some(operator)) = (
+                    self.deployed_id("proxy-governance"),
+                    self.role_pair(*grant),
+                    self.handoff(),
+                    self.progress.admin.as_ref(),
+                ) else {
                     return Ok(false);
                 };
-                let Ok((account, _)) = self.role_pair(*grant) else {
+                // The two states its execution settles on without proposing
+                // anything settle its reconciliation too: otherwise an intent
+                // opened for a step that never needed a proposal would wait
+                // forever for one. The execute half checks both again before
+                // it reads any proposal id.
+                if handoff.oracle_admin == operator.as_str()
+                    || self.holds_admin(&governance, &account)? == want
+                {
+                    return Ok(true);
+                }
+                // Otherwise the same proof its execution would leave: the
+                // governance holds exactly this operation at exactly the id
+                // this coordinate froze.
+                let Some(id) = Self::frozen_proposal_id(record) else {
                     return Ok(false);
                 };
                 self.operator_reader()
@@ -11923,13 +11936,12 @@ exit 1
         market.clean();
     }
 
-    /// The pool's admin must be the operator this run signs for. A
-    /// configuration naming anyone else is refused at preflight: the
-    /// coordinate that used to discover it is the pool's own, by which point
-    /// every upload, both locked issuers, the Comet initialization and the
-    /// backstop deposit are paid for and the run cannot be resumed past it.
+    /// A handoff target that does not exist on the network is refused at
+    /// preflight: the run would only meet it in the handoff phase, by which
+    /// point every upload, both locked issuers, the Comet initialization and
+    /// the backstop deposit are paid for, and nobody could accept the roles.
     #[test]
-    fn a_pool_admin_that_is_not_the_operator_refuses_the_run_at_preflight() {
+    fn a_handoff_target_absent_from_the_network_refuses_the_run_at_preflight() {
         let mut market = a_real_market("pool-admin", false, false);
         let foreign = fixture_actor(9);
         market
@@ -12242,6 +12254,29 @@ exit 1
             facts.get("proposal").and_then(Value::as_str),
             Some("4"),
             "the execute behind this proposal could never name it: {facts}"
+        );
+        market.clean();
+    }
+
+    /// An open role-proposal intent whose step never needed a proposal — the
+    /// oracle administrator already holds `Admin` — reconciles on resume. The
+    /// frozen id names no proposal, and waiting for one would strand the run
+    /// in the handoff with the deploying key still an administrator.
+    #[test]
+    fn a_role_proposal_that_needed_no_proposal_reconciles() {
+        let foreign = fixture_actor(9);
+        let market = a_market_owed_a_handoff("handoff-role-already", &foreign);
+        let governance = fixture_contract(52);
+        let op = MOp::RealProposeRole { grant: true };
+        let (_, record, d) = market.open_gate_armed(&op, [("proxy-governance", governance.clone())]);
+        assert!(
+            !d.real_effect_present(&op, &record).expect("the readback answers"),
+            "nothing proposed and nothing granted yet must stay unresolved"
+        );
+        market.arm(&format!("hasrole-{}-{}", governance.as_str(), foreign.as_str()), "Admin");
+        assert!(
+            d.real_effect_present(&op, &record).expect("the readback answers"),
+            "an oracle administrator already holding Admin settles the grant's proposal"
         );
         market.clean();
     }
