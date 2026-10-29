@@ -8,6 +8,7 @@ JSON object per line. Python 3 standard library only. See registry/README.md.
     registry.py retire --network N --deployment D
     registry.py check
     registry.py verify --network N [--rpc URL]
+    registry.py check-config FILE... --network N [--rpc URL]
 """
 import argparse
 import base64
@@ -27,6 +28,25 @@ NETWORKS = {
     # listed in the Stellar docs. `--rpc` overrides it.
     "mainnet": "https://mainnet.sorobanrpc.com",
 }
+
+# Launch-pool policy for `check-config` (see README "Configs"). Fixed-point
+# values use the contract's 7 decimals: 10_000_000 = 1.0.
+SCALE = 10_000_000
+I128_MAX = 2**127 - 1
+POLICY = {
+    "c_factor_max": 9_500_000,  # collateral factor <= 0.95
+    "l_factor_max": SCALE,  # liability factor <= 1.0
+    "max_util_cap": 9_900_000,  # borrowable reserves: 0 < util < max_util <= 0.99
+    "min_sources_min": 1,  # per oracle asset: 1 <= min_sources <= len(sources)
+    "max_age_secs_min": 60,  # per oracle asset: 60 s <= max_age_secs <= 24 h
+    "max_age_secs_max": 86_400,
+    "backstop_take_rate_max": SCALE,  # <= 1.0
+    "max_positions_min": 1,
+    "max_positions_max": 30,
+}
+# Values filled in by the deployer, so `null` is legitimate in the config.
+NULL_OK = {"pool.oracle"}
+
 STATUSES = ("active", "retired")
 # `refs` keys whose target is NOT a Templar-deployed contract and so need not
 # be in the registry (e.g. the Pyth Lazer verifier, third-party tokens).
@@ -395,6 +415,11 @@ def fetch(url, keys):
     return found
 
 
+def account_key(g):
+    # LedgerKey::Account{PublicKey::Ed25519(raw)}
+    return base64.b64encode(_i32(0) + _i32(0) + base64.b32decode(g)[1:33]).decode()
+
+
 def cmd_verify(args):
     records, errs = load(args.network)
     if errs:
@@ -431,6 +456,165 @@ def cmd_verify(args):
     return 1 if bad else 0
 
 
+def _nulls(node, path, errs):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k != "notes":
+                _nulls(v, f"{path}.{k}" if path else k, errs)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            _nulls(v, f"{path}[{i}]", errs)
+    elif node is None and path not in NULL_OK:
+        errs.append(f"{path}: null (undecided value)")
+
+
+def _get(errs, d, key, path, kind):
+    """d[key] if present with the right type; a null was already reported by _nulls."""
+    if not isinstance(d, dict):
+        errs.append(f"{path}: expected an object")
+        return None
+    if key not in d:
+        errs.append(f"{path}.{key}: missing")
+        return None
+    v = d[key]
+    if v is None:
+        return None
+    ok = isinstance(v, kind) and not isinstance(v, bool)
+    if not ok:
+        errs.append(f"{path}.{key}: expected {kind.__name__}, got {json.dumps(v)}")
+        return None
+    return v
+
+
+def _bound(errs, path, v, lo, hi):
+    if v is not None and not lo <= v <= hi:
+        errs.append(f"{path}: {v} outside {lo}..{hi}")
+
+
+def _i128(errs, d, key, path):
+    v = _get(errs, d, key, path, str)
+    if v is None:
+        return
+    if not re.fullmatch(r"[0-9]+", v) or not 0 < int(v) <= I128_MAX:
+        errs.append(f"{path}.{key}: {v!r} is not a decimal i128 in 1..i128::MAX")
+
+
+def _check_reserves(cfg, errs):
+    P = POLICY
+    reserves = cfg.get("reserves")
+    if not isinstance(reserves, list) or not reserves:
+        errs.append("reserves: expected a non-empty list")
+        return []
+    labels = []
+    for i, r in enumerate(reserves):
+        at = f"reserves[{i}]"
+        label = _get(errs, r, "label", at, str)
+        labels.append(label)
+        c = _get(errs, r, "config", at, dict)
+        if c is None:
+            continue
+        at += ".config"
+        idx = _get(errs, c, "index", at, int)
+        if idx is not None and idx != i:
+            errs.append(f"{at}.index: {idx}, expected {i} (reserves are 0..n-1 in order)")
+        cf = _get(errs, c, "c_factor", at, int)
+        _bound(errs, f"{at}.c_factor", cf, 0, P["c_factor_max"])
+        lf = _get(errs, c, "l_factor", at, int)
+        _bound(errs, f"{at}.l_factor", lf, 0, P["l_factor_max"])
+        util = _get(errs, c, "util", at, int)
+        mu = _get(errs, c, "max_util", at, int)
+        if lf is not None and lf > 0 and util is not None and mu is not None:
+            if not 0 < util < mu <= P["max_util_cap"]:
+                errs.append(
+                    f"{at}: borrowable reserve needs 0 < util < max_util <= {P['max_util_cap']}, "
+                    f"got util {util}, max_util {mu}"
+                )
+        _i128(errs, c, "supply_cap", at)
+        _i128(errs, c, "min_position", at)
+    return labels
+
+
+def _check_oracle(cfg, labels, errs):
+    P = POLICY
+    assets = _get(errs, cfg.get("oracle"), "assets", "oracle", dict)
+    if assets is None:
+        return
+    for label in labels:
+        if label is not None and label not in assets:
+            errs.append(f"oracle.assets.{label}: missing (reserve {label!r} has no oracle entry)")
+    for name, a in assets.items():
+        at = f"oracle.assets.{name}"
+        srcs = _get(errs, a, "sources", at, list)
+        ms = _get(errs, a, "min_sources", at, int)
+        if ms is not None and not P["min_sources_min"] <= ms <= (len(srcs) if srcs is not None else ms):
+            errs.append(f"{at}.min_sources: {ms} outside {P['min_sources_min']}..{len(srcs)} (number of sources)")
+        _bound(errs, f"{at}.max_age_secs", _get(errs, a, "max_age_secs", at, int), P["max_age_secs_min"], P["max_age_secs_max"])
+
+
+def check_config(cfg, network, url):
+    """(problems, summary) for one parsed pool config; admins are looked up on `url`."""
+    P = POLICY
+    errs = []
+    if not isinstance(cfg, dict):
+        return ["top level: expected an object"], None
+    _nulls(cfg, "", errs)
+    if cfg.get("network") != network:
+        errs.append(f"network: {cfg.get('network')!r}, expected {network!r}")
+    pool = cfg.get("pool")
+    _bound(errs, "pool.backstop_take_rate", _get(errs, pool, "backstop_take_rate", "pool", int), 0, P["backstop_take_rate_max"])
+    _bound(errs, "pool.max_positions", _get(errs, pool, "max_positions", "pool", int), P["max_positions_min"], P["max_positions_max"])
+    labels = _check_reserves(cfg, errs)
+    _check_oracle(cfg, labels, errs)
+    oracle = cfg.get("oracle") if isinstance(cfg.get("oracle"), dict) else {}
+    admins = [("pool.admin", _get(errs, pool, "admin", "pool", str))]
+    if "admin" in oracle:
+        admins.append(("oracle.admin", _get(errs, oracle, "admin", "oracle", str)))
+    keys = {}
+    for path, addr in admins:
+        if addr is None:
+            continue
+        if strkey_ok(addr, "G"):
+            keys[path] = (addr, account_key(addr), "account")
+        elif strkey_ok(addr, "C"):
+            keys[path] = (addr, instance_key(addr), "contract instance")
+        else:
+            errs.append(f"{path}: {addr!r} is not a checksum-valid G or C strkey")
+    if keys:
+        try:
+            found = fetch(url, [k for _, k, _ in keys.values()])
+        except Exception as e:  # fail closed: an unverifiable admin is a problem
+            errs.append(f"admin lookup on {url} failed: {e}")
+        else:
+            for path, (addr, key, what) in keys.items():
+                if key not in found:
+                    errs.append(f"{path}: {addr} has no {what} on {network}")
+    runtime = oracle.get("runtime")
+    summary = (
+        f"reuses runtime {runtime}"
+        if runtime
+        else "deploys its own runtime (the run pauses at the refresh phase until the new Lazer sources are pushed)"
+    )
+    return errs, summary
+
+
+def cmd_check_config(args):
+    url = args.rpc or NETWORKS[args.network]
+    bad = 0
+    for f in args.files:
+        try:
+            cfg = json.loads(Path(f).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            errs, summary = [f"unreadable config: {e}"], None
+        else:
+            errs, summary = check_config(cfg, args.network, url)
+        for e in errs:
+            print(f"{f}: {e}", file=sys.stderr)
+        bad += bool(errs)
+        if not errs:
+            print(f"{f}: ok ({args.network}; {summary})")
+    return 1 if bad else 0
+
+
 def fail(errs):
     for e in errs:
         print(e, file=sys.stderr)
@@ -440,7 +624,7 @@ def fail(errs):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("add", "retire", "verify"):
+    for name in ("add", "retire", "verify", "check-config"):
         s = sub.add_parser(name)
         s.add_argument("--network", required=True, choices=sorted(NETWORKS))
         if name == "add":
@@ -449,10 +633,13 @@ def main(argv=None):
         elif name == "retire":
             s.add_argument("--deployment", required=True)
         else:
+            if name == "check-config":
+                s.add_argument("files", nargs="+", metavar="CONFIG.json")
             s.add_argument("--rpc", help="Soroban JSON-RPC URL (default: the network's public RPC)")
     sub.add_parser("check")
     args = p.parse_args(argv)
-    return {"add": cmd_add, "retire": cmd_retire, "check": cmd_check, "verify": cmd_verify}[args.cmd](args)
+    handlers = {"add": cmd_add, "retire": cmd_retire, "check": cmd_check, "verify": cmd_verify, "check-config": cmd_check_config}
+    return handlers[args.cmd](args)
 
 
 if __name__ == "__main__":
