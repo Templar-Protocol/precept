@@ -352,7 +352,12 @@ pub(crate) fn market_records(
             "pool_factory": manifest.factory.as_str(),
             "pool_oracle_adapter": manifest.oracle.adapter.as_str(),
         }),
-        Some(manifest.admin.as_str()),
+        // The pool's final admin when the run handed it over, else the
+        // operator that kept it.
+        Some(
+            real.and_then(|real| real.pool_admin.as_deref())
+                .unwrap_or(manifest.admin.as_str()),
+        ),
         None,
         Some(assets),
     ));
@@ -461,7 +466,13 @@ pub(crate) fn market_records(
             &network,
             artifact,
             provenance.sha256.as_str(),
-            &provenance.version,
+            // The registry's `version` is the release tag (`v0.1.5`); the
+            // catalog's version is bare semver.
+            &if provenance.version.starts_with('v') {
+                provenance.version.clone()
+            } else {
+                format!("v{}", provenance.version)
+            },
             json!({"repo": CONTRACTS_REPO, "tag": provenance.tag, "asset": provenance.asset}),
         ));
     }
@@ -1466,6 +1477,39 @@ mod tests {
             .expect("records");
         assert!(!rows.iter().any(|row| row["role"] == json!("lazer_source")));
         assert!(!rows.iter().any(|row| row["id"] == json!(LAZER_ONE)));
+    }
+
+    /// What a handed-over pool's registry rows say: the pool row names the
+    /// final admin the run proposed, not the key that deployed it, and a
+    /// release recorded from the catalog's bare semver carries the tag form
+    /// every other `version` in the registry uses.
+    #[test]
+    fn a_handed_over_pool_records_its_final_admin_and_tagged_versions() {
+        let mut manifest = real_manifest();
+        let curator = "CCZUTKWXY4ZFJZXDVIC27O4MPZCVT3P22VRQWTQEAM5ERXA2IMUBSJZ6";
+        manifest.real.as_mut().expect("a real manifest").pool_admin = Some(curator.into());
+        let mut plan = real_plan();
+        plan.releases.insert(
+            "pool".into(),
+            Provenance {
+                artifact: "pool".into(),
+                version: "0.1.5".into(),
+                tag: "pool-v0.1.5".into(),
+                asset: "pool.wasm".into(),
+                sha256: plan.artifacts["pool"].clone(),
+                length: 1,
+                catalog_commit: "c".repeat(40),
+            },
+        );
+        let rows = market_records(&manifest, &plan, "market-live-20261027", "2026-10-27")
+            .expect("real market records");
+        let pool = rows.iter().find(|row| row["role"] == "pool").expect("pool row");
+        assert_eq!(pool["admin"], json!(curator), "the pool row names the deployer, not its owner");
+        let release = rows
+            .iter()
+            .find(|row| row["kind"] == "wasm" && row["artifact"] == "pool")
+            .expect("the released pool's wasm line");
+        assert_eq!(release["version"], json!("v0.1.5"));
     }
 
     #[test]
