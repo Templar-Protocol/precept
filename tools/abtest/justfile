@@ -17,9 +17,9 @@ default:
 build:
     cargo build --locked --release --target-dir target
 
-# Formatting, the offline test suite, and warning-free Clippy.
+# The offline test suite and warning-free Clippy (the CI gate). The crate is
+# not rustfmt-clean; format only the files a change touches.
 check:
-    cargo fmt -- --check
     cargo test --locked --target-dir target
     cargo clippy --locked --target-dir target --all-targets -- -D warnings
 

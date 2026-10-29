@@ -671,7 +671,7 @@ in this directory and never load a `.env`.
 
 ```sh
 just build                          # release binary; inside the devenv shell
-just check                          # fmt check, offline tests, Clippy -D warnings
+just check                          # offline tests, Clippy -D warnings (the CI gate)
 just market-status                  # exit 1 means NOT READY
 just market-contracts
 just market-assets
