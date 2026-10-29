@@ -7,6 +7,7 @@ build:
 	cargo rustc --manifest-path=pool-factory/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
 	cargo rustc --manifest-path=backstop/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
 	cargo rustc --manifest-path=pool/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
+	cargo rustc --manifest-path=oracle-tripper/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
 	
 	mkdir -p target/wasm32v1-none/optimized
 	stellar contract optimize \
@@ -18,6 +19,9 @@ build:
 	stellar contract optimize \
 		--wasm target/wasm32v1-none/release/pool.wasm \
 		--wasm-out target/wasm32v1-none/optimized/pool.wasm
+	stellar contract optimize \
+		--wasm target/wasm32v1-none/release/oracle_tripper.wasm \
+		--wasm-out target/wasm32v1-none/optimized/oracle_tripper.wasm
 	cd target/wasm32v1-none/optimized/ && \
 		for i in *.wasm ; do \
 			ls -l "$$i"; \
