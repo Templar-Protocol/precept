@@ -1,0 +1,21 @@
+[package]
+name = "oracle-tripper"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+license = "MIT"
+
+[lib]
+name = "oracle_tripper"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+templar-proxy-oracle-soroban-common = { git = "https://github.com/Templar-Protocol/contracts", rev = "eea0060d4eda3459599031722d88201fb1139d6a" }
+templar-proxy-oracle-soroban-governance-common = { git = "https://github.com/Templar-Protocol/contracts", rev = "eea0060d4eda3459599031722d88201fb1139d6a" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+templar-proxy-oracle-soroban-governance-contract = { git = "https://github.com/Templar-Protocol/contracts", rev = "eea0060d4eda3459599031722d88201fb1139d6a", features = ["testutils"] }
+templar-proxy-oracle-soroban-contract = { git = "https://github.com/Templar-Protocol/contracts", rev = "eea0060d4eda3459599031722d88201fb1139d6a", features = ["testutils"] }
