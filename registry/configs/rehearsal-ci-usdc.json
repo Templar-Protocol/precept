@@ -1,0 +1,99 @@
+{
+  "name": "rehearsal-ci-usdc",
+  "network": "testnet",
+  "proposed_by": "Templar (issue #49 CI rehearsal on testnet, 2026-10-29)",
+  "pool": {
+    "admin": "CCZUTKWXY4ZFJZXDVIC27O4MPZCVT3P22VRQWTQEAM5ERXA2IMUBSJZ6",
+    "name": "Precept rehearsal - curator handoff",
+    "oracle": null,
+    "backstop_take_rate": 0,
+    "max_positions": 4,
+    "min_collateral": "0"
+  },
+  "reserves": [
+    {
+      "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+      "label": "usdc",
+      "config": {
+        "index": 0,
+        "decimals": 7,
+        "c_factor": 0,
+        "l_factor": 10000000,
+        "util": 9000000,
+        "max_util": 9900000,
+        "r_base": 1000,
+        "r_one": 799000,
+        "r_two": 1200000,
+        "r_three": 1200000,
+        "reactivity": 0,
+        "supply_cap": "170141183460469231731687303715884105727",
+        "min_position": "10000000",
+        "enabled": true
+      }
+    },
+    {
+      "asset": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      "label": "xlm",
+      "config": {
+        "index": 1,
+        "decimals": 7,
+        "c_factor": 8000000,
+        "l_factor": 0,
+        "util": 8000000,
+        "max_util": 9000000,
+        "r_base": 1000,
+        "r_one": 0,
+        "r_two": 0,
+        "r_three": 0,
+        "reactivity": 0,
+        "supply_cap": "170141183460469231731687303715884105727",
+        "min_position": "500000000",
+        "enabled": true
+      }
+    }
+  ],
+  "target_status": 0,
+  "notes": [
+    "Testnet rehearsal of the pool-plan/pool-deploy workflows (issue #49): own runtime, pool handed to a 2-of-2 smart account, oracle roles to a separate G account. Not a market."
+  ],
+  "oracle": {
+    "lazer_verifier": "CAYFT5JE3UQTKT4Q6ZOZK4FXVYVT6RE3MFC7STA4UB6WAEGBT65MRU52",
+    "admin": "GDFCF6VIAQTZY6ZANSU6I2CFENF2435V6HOJLWWDX6FMQDUUIU4NBRMA",
+    "assets": {
+      "usdc": {
+        "min_sources": 1,
+        "max_age_secs": 300,
+        "sources": [
+          {
+            "kind": "lazer",
+            "feed_id": 7
+          },
+          {
+            "kind": "sep40",
+            "contract": "CBWEMIBCW4STMZYRPPE75S2GDV2SFRSSFE3SCHAQGO7VGP5Z6PKBKRVS",
+            "asset": {
+              "Other": "7"
+            }
+          }
+        ]
+      },
+      "xlm": {
+        "min_sources": 1,
+        "max_age_secs": 300,
+        "sources": [
+          {
+            "kind": "lazer",
+            "feed_id": 23
+          },
+          {
+            "kind": "sep40",
+            "contract": "CBWEMIBCW4STMZYRPPE75S2GDV2SFRSSFE3SCHAQGO7VGP5Z6PKBKRVS",
+            "asset": {
+              "Other": "23"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
