@@ -2799,6 +2799,12 @@ pub struct RealMarketManifest {
     /// source identities are the only evidence.
     #[serde(default)]
     pub lazer_sources: Vec<ContractId>,
+    /// The pool's final admin when the run handed the pool over (the
+    /// configuration's `pool.admin`, proposed in the handoff phase); the
+    /// registry records it as the pool's admin. Absent when the operator
+    /// kept the pool, and in manifests written before handoffs existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_admin: Option<String>,
 }
 
 /// One real asset's own price stack, as configured on the runtime. Sources

@@ -4190,6 +4190,11 @@ impl MarketDeployer {
                 q4w_pct,
                 proxies,
                 lazer_sources,
+                pool_admin: self
+                    .shape
+                    .as_ref()
+                    .and_then(|shape| shape.handoff.as_ref())
+                    .map(|handoff| handoff.pool_admin.clone()),
             }),
             network: MarketNetworkRecord {
                 label: Safe::literal(network.label()),
