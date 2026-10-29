@@ -49,6 +49,9 @@ in
 {
   packages = [ stellar-cli ];
 
+  # tools/abtest's justfile and market commands take the CLI by exact path.
+  env.PRECEPT_STELLAR_BIN = lib.getExe stellar-cli;
+
   languages.rust = {
     enable = true;
     toolchainFile = ./rust-toolchain.toml;
