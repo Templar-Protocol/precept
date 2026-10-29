@@ -1,0 +1,50 @@
+# Shared precept-abtest recipes. Run `just <recipe>` here, or
+# `just -f tools/abtest/justfile <recipe>` from the repo root; recipes run in
+# this directory. Market recipes need PRECEPT_MARKET_RUN; PRECEPT_STELLAR_BIN
+# (a Stellar CLI >= 26.1.0 by exact path) is exported by devenv.
+# Never load a .env: a parent workspace's may hold credentials.
+set dotenv-load := false
+set positional-arguments
+
+export PRECEPT_RPC_URL := env_var_or_default("PRECEPT_RPC_URL", "https://soroban-testnet.stellar.org")
+export PRECEPT_PASSPHRASE := env_var_or_default("PRECEPT_PASSPHRASE", "Test SDF Network ; September 2015")
+
+# List recipes. Nothing builds or sends by default.
+default:
+    @just --justfile "{{justfile()}}" --list
+
+# Build the release binary. Run inside the repo's devenv shell (Rust 1.98.0).
+build:
+    cargo build --locked --release --target-dir target
+
+# The offline test suite and warning-free Clippy (the CI gate). The crate is
+# not rustfmt-clean; format only the files a change touches.
+check:
+    cargo test --locked --target-dir target
+    cargo clippy --locked --target-dir target --all-targets -- -D warnings
+
+# Unsigned explorer. Quit and rerun after a rebuild.
+market-explore: (_market "tui" "--mode" "explore")
+
+# Signed explorer; a send still needs p (prepare) then y (confirm).
+@market-explore-signed signer:
+    : "${PRECEPT_SIGNER_CONFIG_DIR:?set PRECEPT_SIGNER_CONFIG_DIR to the Stellar config directory holding your signer key}"
+    exec just --justfile "{{justfile()}}" -- _market tui --mode explore --signer "$1" --signer-config-dir "$PRECEPT_SIGNER_CONFIG_DIR"
+
+# Health and price readiness. Exit 1 means NOT READY, not necessarily a CLI failure.
+market-status: (_market "status")
+
+# The oracle's registered assets, not every manifest token.
+market-assets: (_market "query" "proxy-runtime" "registered_assets")
+
+# Deployed pool, backstop, oracle, source and token addresses.
+market-contracts: (_market "contracts")
+
+# Read or simulate one live method: just market-query token.usdc balance --arg 'id=G...'
+market-query role method *args:
+    @just --justfile "{{justfile()}}" -- _market query "$@"
+
+@_market +args:
+    : "${PRECEPT_MARKET_RUN:?set PRECEPT_MARKET_RUN to your market run directory}"
+    : "${PRECEPT_STELLAR_BIN:?set PRECEPT_STELLAR_BIN to the devenv-exported Stellar CLI}"
+    exec target/release/precept-abtest --out "$PRECEPT_MARKET_RUN" --stellar-bin "$PRECEPT_STELLAR_BIN" --rpc-url "$PRECEPT_RPC_URL" --passphrase "$PRECEPT_PASSPHRASE" market "$@"

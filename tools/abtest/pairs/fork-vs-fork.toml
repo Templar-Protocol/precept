@@ -1,0 +1,25 @@
+description = "The same fork on both sides with different reserve parameters, to see what a configuration change alone moves. Any trap or loss-path divergence here would be a bug, since the code is identical."
+profile = "fork-vs-fork"
+
+[shared]
+token_wasm = "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sep-41-token-1.2.0/src/testutils/mock_sep_41_token.wasm"
+oracle_wasm = "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sep-40-oracle-1.2.0/src/testutils/mock_sep_40_oracle.wasm"
+comet_wasm = "~/precept/comet.wasm"
+emitter_wasm = "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blend-contract-sdk-1.22.0/wasm/emitter.wasm"
+
+# Side A: the fork at its default reserve parameters, built by `make differential` in precept (the Blend fork).
+[a]
+label = "fork-default"
+pool_wasm = "~/precept/target/wasm32v1-none/optimized/pool.wasm"
+backstop_wasm = "~/precept/target/wasm32v1-none/optimized/backstop.wasm"
+factory_wasm = "~/precept/target/wasm32v1-none/optimized/pool_factory.wasm"
+
+[b]
+label = "fork-tight"
+pool_wasm = "~/precept/target/wasm32v1-none/optimized/pool.wasm"
+backstop_wasm = "~/precept/target/wasm32v1-none/optimized/backstop.wasm"
+factory_wasm = "~/precept/target/wasm32v1-none/optimized/pool_factory.wasm"
+
+# Side B: tighter XLM collateral factor.
+[b.reserves.xlm]
+c_factor = 6000000

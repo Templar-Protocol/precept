@@ -1,0 +1,44 @@
+name: abtest
+# Gate for tools/abtest (precept-abtest): the offline test suite and
+# warning-free Clippy. Every test runs against a fake `stellar` CLI or a
+# scripted executor, so no CLI, network or chain is needed here. No rustfmt
+# step: the crate is not rustfmt-clean, and reformatting it wholesale would
+# bury real changes; format only the files a change touches.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - tools/abtest/**
+      - .github/workflows/abtest.yml
+  push:
+    branches:
+      - main
+    paths:
+      - tools/abtest/**
+      - .github/workflows/abtest.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/abtest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: stellar/actions/rust-cache@97ffa3486f8d355535d989edfe78795f05ec11b6 # main as of 2026-10-23
+      # tools/abtest/rust-toolchain.toml pins the toolchain; rustup honours it
+      # from the working directory.
+      - run: rustup toolchain install
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked

@@ -1,0 +1,199 @@
+# Disposable protected Blend market — single-market configuration template.
+#
+# Checked in, secret-free, and testnet-only. It carries artifact paths and
+# required SHA-256 digests, the oracle quorum/freshness shape, adapter
+# metadata, reserve parameters, and initial fake balances. It holds no signer
+# keys, no identity aliases, no CLI config directories, and no RPC credentials:
+# those live only in the non-serializable runtime execution context.
+#
+# The parser (`MarketConfig::load` in src/manifest.rs) rejects this file until
+# every digest below is a real optimized-Wasm SHA-256 and every path exists.
+# Release-form roles (proxy-runtime/proxy-governance) carry no path: their
+# bytes are downloaded, length- and SHA-256-verified against the CI-recorded
+# catalog row, and cached before any network call (src/release.rs).
+# That is deliberate: a market must never reach the network on a missing or
+# unverified artifact.
+#
+# Filled 2026-09-25: every sha256 is the real digest of the file at that path
+# (verified by re-hashing, not transcribed). Paths assume a precept checkout
+# at ~/precept; edit them for yours. A pin path must be absolute or start ~/.
+# Provenance per role:
+#   - pool/backstop/factory: optimized build of Templar-Protocol/precept main
+#     @ 886e26f (PR #28: soroban-sdk 25.3.0, Rust 1.98.0, wasm32v1-none,
+#     `make build` with Stellar CLI 28.1.0), emitted to
+#     ~/precept/target/wasm32v1-none/optimized/ and matching CI-verified PR #28.
+#     These replace the 2026-09-25 wasm32-unknown-unknown pins (pool 2db04d55…,
+#     backstop 6bd13007…, factory 80abaf3c…; Rust 1.81.0), which remain
+#     recorded for the already-run campaigns and are not needed by any
+#     deployed market.
+#   - token/emitter: prebuilt registry testutils/wasm files from
+#     sep-41-token 1.2.0 and blend-contract-sdk 1.22.0 under
+#     ~/.cargo/registry, matching registry-inputs.json; comet: the tracked
+#     prebuilt blend-contracts-v2/comet.wasm. Not compiled here.
+#   - proxy-runtime/proxy-governance: resolved from published
+#     Templar-Protocol/contracts releases (see the [artifacts.proxy-*]
+#     tables). The historical 2026-09-25 path pins were built from contracts
+#     @ 6477b1d7 via just optimize-runtime/optimize-governance; they are
+#     superseded by the catalogued releases.
+#   - source: the Templar price-source publisher (build it and place the
+#     optimized Wasm at the path below). Its
+#     implementation and tests are unchanged apart from rustfmt; the optimized
+#     artifact below was rebuilt here with Rust 1.89.0, Stellar CLI 26.1.0
+#     for the build and CLI 22.6.0 for optimization.
+#     Its ABI spec matches the original build; its Wasm hash differs from the
+#     already deployed source hash 8eb795e8f88651b8e90d61ced81530e2bb379067cdc428c168fb14df7d07a70b.
+#     UNQUALIFIED: no size gate or reproducibility record exists for it.
+#   - adapter: recover the qualified deployed bytes by a read-only fetch of
+#     the testnet adapter contract; the fetched hash equals the previously
+#     pinned qualified digest bbdeee7b29d0b6e86af86cbf4ff1e9b76c34a2d27b088134a61151d46e3e17fb.
+#     A fresh mixed-version CLI build did not reproduce those bytes and was
+#     not substituted.
+# VERDICTS (historical, about the superseded 2026-09 build): that pool
+# 2db04d55fa91246f263c7cd98ba9b436a97e5f32218d67a86ea7beca057939fa
+# did NOT equal the reviewed PR #7/8 artifact
+# 441e95a552c7397ce65ba2cef7332e02ec85ee0d3da1d944d587702c21266c6b
+# because the working tree was the security
+# fork, not that PR's base. Adapter equals its qualified pin. The pins
+# below are the current precept main build, repinned from the superseded one.
+# DURABILITY: the pool/backstop/factory and proxy/source pins resolve into
+# build-output trees and the token/emitter pins into cargo's package cache —
+# all disposable. A make/cargo clean or registry purge invalidates them, and
+# registry paths are registry-hash-specific. Re-hash every pin against
+# recorded provenance before any real deploy; treat a stale pin as a hard
+# stop, not a rebuild instruction.
+
+[network]
+# Market-mode invariant: this exact string, no substitution, not relaxable.
+passphrase = "Test SDF Network ; September 2015"
+label = "testnet"
+
+# One pin per role. `source` is intentionally reused for all three source
+# contracts: three distinct deployments of the same pinned (UNQUALIFIED, see
+# above) Wasm, never three different builds. The market gets three distinct
+# deployed addresses, which is quorum *shape* only — one administrator, so no
+# independent data or Byzantine protection.
+[artifacts.pool]
+path = "~/precept/target/wasm32v1-none/optimized/pool.wasm"
+sha256 = "acf7a128074d4d9c34b4ac4e8ab46cc1148eb353eb3908ad0faf922851728086"
+
+[artifacts.backstop]
+path = "~/precept/target/wasm32v1-none/optimized/backstop.wasm"
+sha256 = "41608bcb5176fdfdc74d4594be7ea538e93bc32bda24bc537cc1cd9e44e650d1"
+
+[artifacts.factory]
+path = "~/precept/target/wasm32v1-none/optimized/pool_factory.wasm"
+sha256 = "47956acea8b2ca37ea83e4153fd592609f430ddc4899eca7d7878c6bf1cfbe65"
+
+[artifacts.token]
+path = "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sep-41-token-1.2.0/src/testutils/mock_sep_41_token.wasm"
+sha256 = "dd77fe6e7554cdf3d4ab32730fc2c9fb1039f0b16c5ed99769ae62b9809801f1"
+
+[artifacts.source]
+path = "~/price-source/templar_price_source_contract.optimized.wasm"
+sha256 = "7ac962b0eb5c51a4df2f5d9a0471bc1aea0d9e2508477df0ea65a46dfca9ea70"
+
+[artifacts.comet]
+path = "~/precept/comet.wasm"
+sha256 = "5d721fa580714291f6846fc01738e86d70acb47e449ea75312e272a0f7436dd8"
+
+[artifacts.emitter]
+path = "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blend-contract-sdk-1.22.0/wasm/emitter.wasm"
+sha256 = "438a5528cff17ede6fe515f095c43c5f15727af17d006971485e52462e7e7b89"
+
+# Release form: bytes come from the published Templar-Protocol/contracts
+# GitHub Release named by the CI-recorded catalog row
+# (contract/artifacts/releases/<key>@<version>.tsv on `dev`), never from a
+# local build. `release` is the catalog artifact key this role must resolve;
+# with no `version`, the newest CATALOGUED stable release ("latest" = the
+# highest semver with a catalog row; releases without one are never used) is
+# resolved once at deploy start. The exact resolved version, digest, tag, and
+# catalog commit are then frozen into the run's deployment-plan.toml, and
+# every resume/reconcile runs on those frozen values — `latest` is never
+# re-resolved for an existing run. Override at the CLI with
+# `--artifact-version proxy-runtime=<version|latest>`.
+[artifacts.proxy-runtime]
+release = "soroban-proxy-oracle"
+
+[artifacts.proxy-governance]
+release = "soroban-proxy-governance"
+
+[artifacts.adapter]
+path = "~/precept/target/wasm32v1-none/release-soroban-checked/pool_oracle_adapter.optimized.wasm"
+sha256 = "bbdeee7b29d0b6e86af86cbf4ff1e9b76c34a2d27b088134a61151d46e3e17fb"
+
+# Three same-admin synthetic sources under one proxy. `resolution` here is the
+# SEP-40 feed's own granularity and is deliberately NOT the adapter's
+# resolution — the adapter is its own Blend oracle. Do not harmonize them.
+[oracle]
+sources = 3
+min_sources = 3
+max_age_secs = 3600
+max_clock_drift_secs = 60
+base = "USD"
+decimals = 7
+resolution = 300
+
+# Immutable adapter metadata. Construction rejects any other shape.
+[adapter]
+decimals = 7
+resolution = 1
+base = "USD"
+
+# Reserve parameters (7-decimal fixed point except supply_cap, a base-unit
+# i128 string). `market deploy` refuses any reserve that leaves a parameter
+# unset: nothing falls back to the fixture defaults in src/deploy.rs. The
+# values below are those defaults spelled out; the live 2026-09-30 market was
+# deployed with them. They are testnet fixture values, not reviewed production
+# risk parameters (caps are effectively unlimited; weth is i128::MAX).
+[reserves.stable]
+c_factor = 9000000
+l_factor = 9500000
+util = 8500000
+max_util = 9500000
+supply_cap = "1000000000000000000"
+r_base = 100000
+r_one = 500000
+r_two = 5000000
+r_three = 15000000
+reactivity = 20
+
+[reserves.xlm]
+c_factor = 7500000
+l_factor = 7500000
+util = 5000000
+max_util = 9500000
+supply_cap = "1000000000000000000"
+r_base = 100000
+r_one = 500000
+r_two = 5000000
+r_three = 15000000
+reactivity = 20
+
+[reserves.weth]
+c_factor = 8000000
+l_factor = 8000000
+util = 7000000
+max_util = 9500000
+supply_cap = "170141183460469231731687303715884105727"
+r_base = 100000
+r_one = 500000
+r_two = 5000000
+r_three = 15000000
+reactivity = 20
+
+# Playable balances for the run-local actors. Fake assets only — no real value
+# moves on testnet.
+[[balances]]
+who = "frodo"
+token = "stable"
+amount = 100000000000
+
+[[balances]]
+who = "sam"
+token = "stable"
+amount = 100000000000
+
+[[balances]]
+who = "user"
+token = "stable"
+amount = 100000000000

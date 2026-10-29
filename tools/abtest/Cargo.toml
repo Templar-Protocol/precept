@@ -1,0 +1,19 @@
+[package]
+name = "precept-abtest"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "Deploy two Blend pools on Stellar testnet and A/B them through the stellar CLI"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "=4.5.20", features = ["derive", "env"] }  # later 4.5.x pull clap_lex 1.x (edition2024, needs cargo >= 1.85)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }   # crossterm arrives via ratatui::crossterm
+libc = "0.2"   # already in the graph via crossterm; supplies per-architecture O_* open flags
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[workspace]
