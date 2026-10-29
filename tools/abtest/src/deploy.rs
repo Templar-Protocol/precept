@@ -285,18 +285,17 @@ pub(crate) fn keccak256(data: &[u8]) -> [u8; 32] {
     const RATE: usize = 136; // 1088-bit rate for a 256-bit digest
     let mut state = [0u64; 25];
     let absorb = |block: &[u8], state: &mut [u64; 25]| {
-        for (i, lane) in block.chunks_exact(8).enumerate() {
-            state[i] ^= u64::from_le_bytes(lane.try_into().expect("lane"));
+        for (i, lane) in block.as_chunks::<8>().0.iter().enumerate() {
+            state[i] ^= u64::from_le_bytes(*lane);
         }
         keccak_f1600(state);
     };
-    let mut blocks = data.chunks_exact(RATE);
-    for block in blocks.by_ref() {
+    let (blocks, rem) = data.as_chunks::<RATE>();
+    for block in blocks {
         absorb(block, &mut state);
     }
-    // The remainder comes from the SAME (now exhausted) iterator, so the
-    // tail is the true tail — the same trap the sha256 896-bit KAT guards.
-    let rem = blocks.remainder();
+    // The remainder comes from the SAME split, so the tail is the true
+    // tail — the same trap the sha256 896-bit KAT guards.
     let mut block = [0u8; RATE];
     block[..rem.len()].copy_from_slice(rem);
     block[rem.len()] ^= 0x01;
@@ -316,7 +315,7 @@ const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 /// RFC 4648 base32, no padding (the strkey encoding).
 fn base32_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity((data.len() * 8 + 4) / 5);
+    let mut out = String::with_capacity((data.len() * 8).div_ceil(5));
     let mut buffer: u32 = 0;
     let mut bits: u32 = 0;
     for &b in data {
@@ -1248,7 +1247,7 @@ pub enum DeployEvent {
     Phase { id: usize, label: Safe },
     Confirm { token: String, summary: Safe },
     Custody { unresolved: bool, note: Safe },
-    Done(MarketManifest),
+    Done(Box<MarketManifest>),
     Failed(Safe),
 }
 
@@ -4177,7 +4176,7 @@ impl MarketDeployer {
     /// mutation and ends in a terminal event, never at a gate.
     fn advance(&mut self) -> anyhow::Result<DeployEvent> {
         if let Some(m) = &self.manifest {
-            return Ok(DeployEvent::Done(m.clone()));
+            return Ok(DeployEvent::Done(Box::new(m.clone())));
         }
         if self.nonce == 0 || !self.plan_written {
             let e = anyhow!("no frozen deployment plan is bound, so no mutation is authorized");
@@ -6188,7 +6187,7 @@ impl MarketDeployer {
                 let asset = self.leg_asset(*leg)?;
                 Ok(reader
                     .ledger_trustline(admin.as_str(), &asset)?
-                    .map_or(false, |line| line.balance_stroops >= self.leg_seed(*leg)))
+                    .is_some_and(|line| line.balance_stroops >= self.leg_seed(*leg)))
             }
             MOp::LockIssuer { leg } => {
                 let issuer = match self.issuer_of(*leg) {
@@ -6533,10 +6532,10 @@ impl MarketDeployer {
             MOp::RealDeployFactory => "factory".to_string(),
             MOp::RealDeployPool => "pool".to_string(),
             MOp::RealFreezeComet => "comet".to_string(),
-            MOp::Mint { index } => match self.cfg.balances.get(*index) {
-                Some(b) => format!("token:{}", b.token.as_str()),
-                None => return None,
-            },
+            MOp::Mint { index } => {
+                let b = self.cfg.balances.get(*index)?;
+                format!("token:{}", b.token.as_str())
+            }
             _ => return None,
         })
     }
@@ -7842,14 +7841,14 @@ impl MarketDeployer {
     /// refuses terminally rather than emitting an unproven `Done`.
     fn publish(&mut self) -> anyhow::Result<DeployEvent> {
         if let Some(manifest) = self.manifest.clone() {
-            self.terminal = Some(DeployEvent::Done(manifest));
+            self.terminal = Some(DeployEvent::Done(Box::new(manifest)));
             return Ok(self.terminal.clone().unwrap());
         }
         let settled = self.publish_proof_settled()?;
         match MarketManifest::load(self.journal.out().as_path()) {
             Ok(manifest) if settled => {
                 self.manifest = Some(manifest.clone());
-                self.terminal = Some(DeployEvent::Done(manifest));
+                self.terminal = Some(DeployEvent::Done(Box::new(manifest)));
             }
             _ => {
                 self.terminal = Some(DeployEvent::Failed(Safe::literal(
@@ -12516,7 +12515,7 @@ exit 1
         // whole token below it must be refused by the law itself.
         let b4 = (minimum.0 / 10_000_000) as u128;
         let b4 = b4.pow(4);
-        let floor_min = (10u128.pow(25) + b4 - 1) / b4;
+        let floor_min = 10u128.pow(25).div_ceil(b4);
         let usdc_short = ((floor_min - 1) * 10_000_000).to_string();
         for (label, blnd, usdc, q4w, held, expect_settled) in [
             (
@@ -13258,7 +13257,7 @@ exit 1
                 || facts
                     .as_ref()
                     .and_then(|v| v.get("tokens"))
-                    .map_or(true, |v| v.is_null()),
+                    .is_none_or(|v| v.is_null()),
             "a reconciled coordinate fabricates the facts it never recorded: {facts:?}"
         );
         market.arm_deployed(

@@ -78,7 +78,7 @@ fn backstop_liabilities_empty(r: &StepRecord) -> bool {
         .positions
         .get("backstop")
         .and_then(|p| p.get("liabilities"))
-        .map_or(true, |v| map_entries(v).is_empty())
+        .is_none_or(|v| map_entries(v).is_empty())
 }
 
 fn action_event_names(step: &Step) -> &'static [&'static str] {

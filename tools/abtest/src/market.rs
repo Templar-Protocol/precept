@@ -1187,16 +1187,16 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
     ];
-    let mut chunks = data.chunks_exact(64);
-    for chunk in chunks.by_ref() {
-        sha256_compress(&mut state, chunk.try_into().expect("64-byte chunk"));
+    let (chunks, tail) = data.as_chunks::<64>();
+    for chunk in chunks {
+        sha256_compress(&mut state, chunk);
     }
     // Padding (FIPS 180-4 §5.1): append 0x80, zeros, then the 64-bit
     // big-endian bit length; a second block when the length overflows the
-    // first. `chunks` is exhausted, so its `remainder()` is the true message
-    // tail — never a fresh iterator's prefix. Message length is bounded by
-    // `isize::MAX`, so the bit length always fits in a `u64`.
-    let tail = chunks.remainder();
+    // first. The `tail` comes from the same split as the full blocks, so it
+    // is the true message tail — never a fresh iterator's prefix. Message
+    // length is bounded by `isize::MAX`, so the bit length always fits in a
+    // `u64`.
     let bit_len = (data.len() as u64) * 8;
     let mut block = [0u8; 64];
     block[..tail.len()].copy_from_slice(tail);

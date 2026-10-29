@@ -1297,7 +1297,7 @@ pub(crate) fn verify_settled_custody(
                 && intent
                     .predicted
                     .as_ref()
-                    .map_or(true, |predicted| predicted == claimed)
+                    .is_none_or(|predicted| predicted == claimed)
         }
         (Some(_), None) => false,
         (None, Some(claimed)) => intent

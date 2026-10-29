@@ -1237,7 +1237,7 @@ mod tests {
         ];
         for (_category, _action, _role, method, _help) in catalog() {
             assert!(
-                declared.iter().any(|known| *known == method),
+                declared.contains(&method),
                 "the catalog offers {method}, which the pinned contract sources do not declare"
             );
         }

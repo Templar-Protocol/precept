@@ -451,7 +451,7 @@ fn find_runs() -> Vec<PathBuf> {
             (t, e.path())
         })
         .collect();
-    runs.sort_by(|a, b| b.0.cmp(&a.0));
+    runs.sort_by_key(|a| std::cmp::Reverse(a.0));
     runs.into_iter().map(|(_, p)| p).collect()
 }
 

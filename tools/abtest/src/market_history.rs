@@ -1274,7 +1274,7 @@ mod tests {
             calls.iter().all(|argv| !argv.iter().any(|a| a == cursor)),
             "the continuation cursor never reaches a changed endpoint"
         );
-        for proof in calls.chunks_exact(2) {
+        for proof in calls.as_chunks::<2>().0 {
             assert_eq!(proof[0], ["--version"]);
             assert!(
                 proof[1].len() >= 2 && proof[1][0] == "network" && proof[1][1] == "info",

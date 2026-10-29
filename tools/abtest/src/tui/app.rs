@@ -2907,7 +2907,7 @@ pub mod tests {
                 .iter()
                 .map(|r| (r.clause, &r.status, &r.evidence))
                 .collect::<Vec<_>>(),
-            &app.integrity,
+            app.integrity,
             app.steps
                 .iter()
                 .map(|s| (
@@ -3921,7 +3921,7 @@ mod market_tests {
     #[test]
     fn done_publishes_the_public_summary() {
         let mut s = MarketApp::new();
-        s.apply_market(&DeployEvent::Done(fixture_manifest()));
+        s.apply_market(&DeployEvent::Done(Box::new(fixture_manifest())));
         assert!(s.done);
         assert!(s.confirm_summary.is_none());
         assert!(s

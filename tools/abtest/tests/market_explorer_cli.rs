@@ -1441,7 +1441,7 @@ fn market_query_refuses_unknown_malformed_and_duplicated_args_before_invoking() 
         vec!["--arg".to_string(), "bogus=SENTINEL-UNKNOWN".into()],
         vec![
             "--arg".to_string(),
-            format!("asset=SENTINEL-CONTROL-\u{1b}"),
+            "asset=SENTINEL-CONTROL-\u{1b}".to_string(),
         ],
         vec![
             "--arg".to_string(),
@@ -1972,7 +1972,7 @@ fn market_status_refuses_readiness_when_a_price_is_absent_and_fabricates_nothing
         if state == "adapter-price-null" {
             explicit_absence += 1;
             assert!(
-                price.get("observed").map_or(true, Value::is_null),
+                price.get("observed").is_none_or(Value::is_null),
                 "an absent price must carry no observed data: {stdout}"
             );
         }
@@ -3912,7 +3912,7 @@ fn assert_mutation_boundary_held(h: &Harness, cwd_log: &std::path::Path, run: &s
             || words
                 .windows(2)
                 .any(|w| w[0] == "--signer" && !w[1].is_empty());
-        let config = words.iter().any(|w| *w == "--config-dir");
+        let config = words.contains(&"--config-dir");
         assert!(
             pinned && alias && config,
             "a market mutation must originate from a pinned G-address, sign by \
