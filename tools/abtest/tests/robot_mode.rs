@@ -32,6 +32,10 @@ const BIN: &str = env!("CARGO_BIN_EXE_precept-abtest");
 /// administrator pin is rewritten to it.
 const ADMIN_G: &str = "GBDV7KHJMC36EEXW5V75FJCGPIDRPJNEWL7Z7LID3CHY5OAE2NRREWZX";
 
+/// A contract the injected CLI knows — the oracle runtime the fixture quotes —
+/// standing in for a curator whose market this run deploys.
+const CURATOR_C: &str = "CC64WBDGS6QQP22QTTIACYIXT3WF7BBQEYOQPLTP7GTKYY7PZ74QYGSL";
+
 /// Exit code of a robot run that printed the plan and stopped.
 const PLAN_EXIT: i32 = 3;
 /// Exit code of a robot run whose approval no longer matches the file.
@@ -204,6 +208,8 @@ case "$*" in
             *) exit 1 ;;
         esac > "$ABTEST_ADMIN.$3"
         ;;
+    *get_owner*) echo '"CC64WBDGS6QQP22QTTIACYIXT3WF7BBQEYOQPLTP7GTKYY7PZ74QYGSL"' ;;
+    *has_role*) echo 'true' ;;
     *contract*upload*|*contract*deploy*|*contract*install*|*tx*submit*|*transaction*submit*|*contract*invoke*)
         booked
         echo '{"return":"0"}'
@@ -803,6 +809,79 @@ fn robot_real_deploy_keeps_its_human_progress_on_stderr() {
     let _ = fs::remove_dir_all(&t.dir);
 }
 
+/// A pool config whose admin is a contract is a market this run owes a
+/// handover for, and the plan a robot approves is where that becomes
+/// visible before anything is sent: the handoff coordinates are in it, with
+/// the roles they act on. A config owned by the deploying key — the shape
+/// every config had before an owner could be named — plans no such step, so
+/// the two runs together are what makes the difference the owner and not an
+/// unrelated fault.
+#[test]
+fn robot_real_deploy_plans_the_handoff_a_curated_pool_owes() {
+    let planned = |tag: &str, owner: &str| -> String {
+        let (t, _lab) = target(tag);
+        let pool = real_pool_config_owned(&t.dir, owner);
+        let out = t.dir.join("run");
+        let output = run(
+            &t,
+            &[
+                "--out",
+                out.to_str().unwrap(),
+                "market",
+                "deploy",
+                "--config",
+                pool.to_str().unwrap(),
+                "--network",
+                "testnet",
+                "--admin-identity",
+                "admin",
+                "--admin-config-dir",
+                t.dir.to_str().unwrap(),
+                "--no-registry",
+                "--robot",
+            ],
+        );
+        let _ = fs::remove_dir_all(&t.dir);
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let curated = planned("real-handoff-curator", CURATOR_C);
+    let plan_steps = |stdout: &str| -> Vec<serde_json::Value> {
+        let lines = json_lines(stdout);
+        let plan = lines
+            .iter()
+            .find(|line| line["event"] == "plan")
+            .unwrap_or_else(|| panic!("the robot prints the plan it asks to approve: {stdout}"));
+        plan["steps"]
+            .as_array()
+            .expect("the plan carries its steps")
+            .clone()
+    };
+    let steps = plan_steps(&curated);
+    let hand = |action: &str| {
+        steps
+            .iter()
+            .any(|step| step["phase"] == 11 && step["action"] == action)
+    };
+    assert!(
+        hand("hand off the pool"),
+        "a pool owned by another key must plan its handover: {curated}"
+    );
+    assert!(
+        hand("hand off a price source"),
+        "a source this run deployed goes with the pool it prices: {curated}"
+    );
+    assert!(
+        hand("hand off the backing pool"),
+        "the backing pool's controller follows the pool's admin: {curated}"
+    );
+    let self_owned = planned("real-handoff-self", ADMIN_G);
+    let owned = plan_steps(&self_owned);
+    assert!(
+        !owned.iter().any(|step| step["phase"] == 11),
+        "a run that hands nothing over plans no handoff: {self_owned}"
+    );
+}
+
 /// A completed real market run directory: the published manifest and the
 /// frozen plan a finished run leaves behind, with one Lazer source this run
 /// deployed and one third-party SEP-40 oracle the pool config quotes. The
@@ -1073,6 +1152,12 @@ fn capture(dir: &Path) -> String {
 /// resolves no release and needs no network to start. What it exercises here
 /// is everything the command prints before its first gate.
 fn real_pool_config(dir: &Path) -> PathBuf {
+    real_pool_config_owned(dir, ADMIN_G)
+}
+
+/// The same pool config owned by `pool_admin`, which is the only thing a
+/// run asks about before it decides whether it owes anyone a handoff.
+fn real_pool_config_owned(dir: &Path, pool_admin: &str) -> PathBuf {
     let reserve = |label: &str, asset: &str, index: u32| {
         serde_json::json!({
             "asset": asset,
@@ -1101,7 +1186,7 @@ fn real_pool_config(dir: &Path) -> PathBuf {
         "name": "abtest-robot-real",
         "network": "testnet",
         "pool": {
-            "admin": ADMIN_G,
+            "admin": pool_admin,
             "name": "Abtest Robot Real",
             // An existing adapter and an existing runtime: this run deploys
             // no proxy code and resolves no release, so it starts offline.
