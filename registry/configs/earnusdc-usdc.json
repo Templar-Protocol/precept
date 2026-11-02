@@ -71,11 +71,14 @@
     "assets": {
       "usdc": {
         "min_sources": 1,
-        "max_age_secs": 300,
+        "max_age_secs": 3600,
         "sources": [
           {
-            "kind": "lazer",
-            "feed_id": 7
+            "kind": "sep40",
+            "contract": "CDXOHZDLLF6AMQ5NLZQOWRSBQIJBFPC4KWQ6SOLKQSQOP2EYDQC4E5IB",
+            "asset": {
+              "Other": "7"
+            }
           },
           {
             "kind": "sep40",
