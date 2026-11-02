@@ -71,7 +71,7 @@
     "assets": {
       "usdc": {
         "min_sources": 1,
-        "max_age_secs": 3600,
+        "max_age_secs": 46800,
         "sources": [
           {
             "kind": "sep40",
