@@ -5018,11 +5018,17 @@ impl MarketDeployer {
             .ok_or_else(|| anyhow!("the backstop custodian is unresolved"))
     }
 
-    /// The keystore name of this run's custodian key. Named per-run like a
-    /// leg issuer's; the key behind it is derived, so the name identifies the
-    /// one key this run's identity implies.
-    fn custodian_key() -> String {
-        "market-backstop-custodian".to_string()
+    /// The keystore name of this run's custodian key, named per-run like a
+    /// leg issuer's — with this run's id in it, because the operator's keystore
+    /// is one namespace shared by every run this deployer key makes. A run
+    /// that stops between the sweep and the burn leaves its custodian alive and
+    /// its key registered; a second run started while it is down must not
+    /// overwrite that entry, or the first resume would find a stranger's key
+    /// where its own belongs and be refused. The key behind the name is derived
+    /// from the run's identity, so the name identifies the one key that
+    /// identity implies and a resume arrives at it again with nothing copied.
+    fn custodian_key(&self) -> String {
+        format!("market-backstop-custodian-{:016x}", self.nonce)
     }
 
     /// The message the custodian's key is derived from: the domain label, then
@@ -5079,7 +5085,7 @@ impl MarketDeployer {
     /// answers another address refuses instead of moving the run's backing
     /// onto an account no deposit was ever made from.
     fn ensure_custodian_key(&self) -> anyhow::Result<(String, AccountId)> {
-        let key = Self::custodian_key();
+        let key = self.custodian_key();
         let keystore = self.keystore_st();
         let recorded = self.progress.custodian.clone();
         if let Some(want) = recorded.as_ref() {
@@ -6560,7 +6566,7 @@ impl MarketDeployer {
                     let st = self.custodian_st(record)?;
                     let sent = st.invoke(
                         backstop.as_str(),
-                        &Self::custodian_key(),
+                        &self.custodian_key(),
                         "deposit",
                         &[
                             kv("from", custodian.as_str()),
@@ -6680,7 +6686,7 @@ impl MarketDeployer {
                 // nothing — any process that can read the journal can derive it
                 // again — and no secret outlives a run whose custodian is
                 // finished. Addresses come from the journal, never a keystore.
-                self.reader().keys_remove(&Self::custodian_key())?;
+                self.keystore_st().keys_remove(&self.custodian_key())?;
                 step(
                     "the custodian can never sign again: master weight zero, thresholds one, no signers",
                     None,
@@ -7661,13 +7667,14 @@ impl MarketDeployer {
             // The custodian's account exists at the address the coordinate
             // that created it recorded. Like a leg's issuer, that address is
             // this run's own knowledge and does not depend on the settlement
-            // that is missing, so the keystore is read as well as the settled
-            // facts: an intent left open by a crash after the send stays
-            // resolvable.
+            // that is missing, so the operator's keystore — the one
+            // `keys add` wrote to, not the read-only actor's — is read as
+            // well as the settled facts: an intent left open by a crash after
+            // the send stays resolvable.
             MOp::FundCustodian => {
                 let custodian = match self.custodian() {
                     Ok(custodian) => Some(custodian),
-                    Err(_) => self.reader().keys_public_key(&Self::custodian_key())?,
+                    Err(_) => self.keystore_st().keys_public_key(&self.custodian_key())?,
                 };
                 let Some(custodian) = custodian else {
                     return Ok(false);
@@ -11300,6 +11307,14 @@ if [ "$1" = contract ] && [ "$2" = read ]; then
 fi
 
 if [ "$1" = keys ] && [ "$2" = public-key ]; then
+    # A key belongs to the config dir that registered it, as it does in the
+    # real CLI: an identity added to the operator's keystore is not visible to
+    # another actor's, and asking for it there is an error, not another answer.
+    own="$S/owner-$3"
+    if [ -f "$own" ] && [ "$(cat "$own")" != "$(arg --config-dir "$@")" ]; then
+        printf 'Failed to find config identity for %s\n' "$3" >&2
+        exit 1
+    fi
     f="$S/key-$3"
     if [ -f "$f" ]; then cat "$f"; printf '\n'; exit 0; fi
     printf 'no identity of this name\n' >&2
@@ -11309,7 +11324,13 @@ if [ "$1" = keys ] && [ "$2" = secret ]; then
     # The deployer's secret is the key material every custodian key is derived
     # from. An armed `secret-<name>` answers; otherwise the stand-in's own
     # generated keypair does, so the derivation is exercised on a real strkey
-    # rather than on a made-up one.
+    # rather than on a made-up one. A key registered by `keys add` is readable
+    # only from the config dir that registered it.
+    own="$S/owner-$3"
+    if [ -f "$own" ] && [ "$(cat "$own")" != "$(arg --config-dir "$@")" ]; then
+        printf 'Failed to find config identity for %s\n' "$3" >&2
+        exit 1
+    fi
     f="$S/secret-$3"
     if [ -f "$f" ]; then cat "$f"; printf '\n'; exit 0; fi
     printf 'SBFX5IWELBNITDDWNJT2YR6Y7GLEYROP434SNAQ3QJXTBGNGGDL3CJMT\n'
@@ -11319,12 +11340,14 @@ if [ "$1" = keys ] && [ "$2" = add ]; then
     # A derived key arrives with its secret on stdin, exactly as the CLI takes
     # it — the secret never reaches the argv the call log records — and the
     # address the run will hold comes from the armed `gen-<name>`, which is
-    # what the CLI would derive from those bytes.
+    # what the CLI would derive from those bytes. The registration belongs to
+    # the config dir it was written into, which is where its identity file is.
     name=$3
     cfg=$(arg --config-dir "$@")
     secret=$(cat)
     [ -n "$secret" ] || { printf 'no secret was given on stdin\n' >&2; exit 1; }
     printf '%s' "$secret" > "$S/secret-$name"
+    printf '%s' "$cfg" > "$S/owner-$name"
     mkdir -p "$cfg/identity"
     printf 'seed_phrase = "derived key registered from stdin"\n' > "$cfg/identity/$name.toml"
     chmod 600 "$cfg/identity/$name.toml"
@@ -11349,7 +11372,15 @@ if [ "$1" = keys ] && [ "$2" = generate ]; then
     exit 0
 fi
 if [ "$1" = keys ] && [ "$2" = rm ]; then
-    rm -f "$S/key-$3"
+    # Removing a key takes everything the registration wrote — the identity
+    # file, the secret behind it, and the record of who owns it — and only
+    # from the config dir that owns it: another actor's `keys rm` cannot take
+    # a key it cannot see.
+    own="$S/owner-$3"
+    if [ -f "$own" ] && [ "$(cat "$own")" != "$(arg --config-dir "$@")" ]; then
+        exit 0
+    fi
+    rm -f "$S/key-$3" "$S/secret-$3" "$S/owner-$3"
     cfg=$(arg --config-dir "$@")
     [ -n "$cfg" ] && rm -f "$cfg/identity/$3.toml"
     exit 0
@@ -12218,10 +12249,7 @@ exit 1
         /// every deployer that rebuilds from this run directory afterwards knows
         /// who holds the backing, exactly as a resumed one would.
         fn arm_custodian(&self, d: &mut MarketDeployer, custodian: &AccountId) {
-            self.arm(
-                &format!("gen-{}", MarketDeployer::custodian_key()),
-                custodian.as_str(),
-            );
+            self.arm(&format!("gen-{}", d.custodian_key()), custodian.as_str());
             let slot = self.slot(&MOp::CreateCustodian);
             self.execute(d, &slot, &self.admin, None);
             assert_eq!(
@@ -14889,10 +14917,7 @@ exit 1
         );
         let custodian = fixture_actor(78);
         let deployer = d.progress.admin.clone().expect("the operator is resolved");
-        market.arm(
-            &format!("gen-{}", MarketDeployer::custodian_key()),
-            custodian.as_str(),
-        );
+        market.arm(&format!("gen-{}", d.custodian_key()), custodian.as_str());
         market.arm_lp(&comet, &deployer, "1000000000");
         market.arm(
             &format!("total-supply-{}", comet.as_str()),
@@ -14994,12 +15019,23 @@ exit 1
             keyrings.is_empty(),
             "a run directory holds key material: {keyrings:?}"
         );
+        // The burn took the key with it. The account is inert and its address
+        // is in the journal, so the operator's keystore has no reason to keep
+        // a secret for it — and removing it is what makes the next run's
+        // custodian the only one that can be signed for.
+        let alias = d.custodian_key();
         assert!(
-            market
-                .state
-                .join(format!("secret-{}", MarketDeployer::custodian_key()))
-                .is_file(),
-            "the custodian's key is not in the keystore a resume signs from"
+            !market.state.join(format!("secret-{alias}")).is_file(),
+            "a burned custodian's secret outlived its key"
+        );
+        assert!(
+            !market.state.join(format!("key-{alias}")).is_file(),
+            "a burned custodian's identity outlived its key"
+        );
+        assert_eq!(
+            d.keystore_st().keys_public_key(&alias).ok().flatten(),
+            None,
+            "the keystore still answers for a custodian that can never sign"
         );
     }
 
@@ -15024,10 +15060,7 @@ exit 1
         );
         let custodian = fixture_actor(79);
         let deployer = d.progress.admin.clone().expect("the operator is resolved");
-        market.arm(
-            &format!("gen-{}", MarketDeployer::custodian_key()),
-            custodian.as_str(),
-        );
+        market.arm(&format!("gen-{}", d.custodian_key()), custodian.as_str());
         market.arm_lp(&comet, &deployer, "1000000000");
         market.arm(
             &format!("total-supply-{}", comet.as_str()),
@@ -15146,17 +15179,22 @@ exit 1
         );
         // The identity the pool's shares sit on must be the one the keystore
         // can still sign for: the same name, the same secret, the address the
-        // run recorded.
+        // run recorded — and that keystore is the operator's, the one
+        // `keys add` wrote to. A key registered into a config dir belongs to
+        // it, exactly as it does in the real CLI, so the read-only actor's
+        // keystore is asked here to prove it is not the one holding the run's
+        // custodian.
+        let alias = restored.custodian_key();
         let keystore = restored.keystore_st();
         assert_eq!(
             keystore
-                .keys_public_key(&MarketDeployer::custodian_key())
+                .keys_public_key(&alias)
                 .expect("the custodian is still registered"),
             Some(made.clone()),
             "the keystore answers for an address other than the one the run recorded"
         );
         let registered: [u8; 32] = keystore
-            .keys_secret(&MarketDeployer::custodian_key())
+            .keys_secret(&alias)
             .expect("the custodian's secret is still registered");
         let derived_seed: [u8; 32] = strkey_decode(&derived)
             .expect("the derived key is an strkey seed")
@@ -15167,34 +15205,90 @@ exit 1
             registered, derived_seed,
             "the registered key is not the key this run's id derives"
         );
+        assert_eq!(
+            restored.reader().keys_public_key(&alias).ok().flatten(),
+            None,
+            "another actor's keystore answers for the operator's custodian key"
+        );
         // The harder case, and the one the seed file used to answer: a run's
         // keystore is not part of the run, so a resume on another machine has
         // no trace of it. The run re-derives, re-registers, and arrives back
         // at the account its journal says holds the backing.
-        std::fs::remove_file(
-            market
-                .state
-                .join(format!("key-{}", MarketDeployer::custodian_key())),
-        )
-        .expect("the keystore loses the identity");
-        std::fs::remove_file(
-            market
-                .state
-                .join(format!("secret-{}", MarketDeployer::custodian_key())),
-        )
-        .expect("the keystore loses the secret");
-        let (alias, again) = restored
+        for file in ["key", "secret", "owner"] {
+            std::fs::remove_file(market.state.join(format!("{file}-{alias}")))
+                .unwrap_or_else(|e| panic!("the keystore loses its {file}: {e}"));
+        }
+        let (asked, again) = restored
             .ensure_custodian_key()
             .expect("a run with no keystore entry registers its own custodian");
         assert_eq!(
-            alias,
-            MarketDeployer::custodian_key(),
+            asked,
+            restored.custodian_key(),
             "a re-registration used another key name"
         );
         assert_eq!(
             again, made,
             "a re-registered custodian is a different account than the one holding the shares"
         );
+    }
+
+    /// The operator's keystore is one namespace, and more than one run can be
+    /// alive in it: a run stopped between the sweep and the burn leaves its
+    /// custodian's key registered while another run is started with the same
+    /// deployer key. Each run names its key after its own run id, so the
+    /// second registration cannot take the first one's name — the stopped run
+    /// comes back to a keystore that still holds the key its custodian signs
+    /// with, and neither run has to guess which key it is being asked to use.
+    #[test]
+    fn two_runs_do_not_share_a_custodian_key() {
+        let market = a_real_market("custodian-two-keys", true, false);
+        let mut d = market.run(false);
+        let (alice, bob) = (fixture_actor(91), fixture_actor(92));
+        let first = d.custodian_key();
+        market.arm(&format!("gen-{first}"), alice.as_str());
+        market
+            .confirm(&mut d, &MOp::CreateCustodian)
+            .expect("the first run's key needs no chain");
+        assert_eq!(
+            d.progress.custodian.as_ref(),
+            Some(&alice),
+            "the first run did not record its custodian"
+        );
+        // The next run the same operator starts: another run id, so another
+        // name — and it registers into the same keystore, which is the only
+        // thing the two runs have ever shared.
+        d.nonce = d.nonce.wrapping_add(1);
+        let second = d.custodian_key();
+        assert_ne!(
+            first, second,
+            "two runs of one operator were given one keystore name"
+        );
+        market.arm(&format!("gen-{second}"), bob.as_str());
+        d.progress.custodian = Some(bob.clone());
+        let (asked, address) = d
+            .ensure_custodian_key()
+            .expect("the second run registers its own key");
+        assert_eq!(
+            (asked.as_str(), Some(&address)),
+            (second.as_str(), Some(&bob)),
+            "the second run registered under another name or another address"
+        );
+        // And the first run's key is where it left it: the run that comes back
+        // to burn its custodian finds the key it signed with, not the one the
+        // other run registered.
+        assert_eq!(
+            d.keystore_st()
+                .keys_public_key(&first)
+                .expect("the first run's key is still registered"),
+            Some(alice.clone()),
+            "a second run's registration overwrote the first run's custodian key"
+        );
+        for alias in [first.as_str(), second.as_str()] {
+            assert!(
+                market.state.join(format!("secret-{alias}")).is_file(),
+                "one keystore holds only one of the two runs' custodian keys"
+            );
+        }
     }
 
     /// The custodian is an output of the run, never an input: the plan a PR
@@ -15210,11 +15304,9 @@ exit 1
     fn the_plan_does_not_bind_the_custodian_it_has_not_yet_created() {
         let planned = |index: u8, who: AccountId| {
             let market = a_real_market(&format!("custodian-plan-{index}"), false, false);
-            market.arm(
-                &format!("gen-{}", MarketDeployer::custodian_key()),
-                who.as_str(),
-            );
             let mut d = market.run(false);
+            let alias = d.custodian_key();
+            market.arm(&format!("gen-{alias}"), who.as_str());
             let derived = d
                 .derive_custodian_secret()
                 .expect("a run's identity always derives its custodian key");
