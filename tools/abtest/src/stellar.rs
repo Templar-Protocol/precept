@@ -6520,7 +6520,11 @@ while :; do :; done
                 }),
                 "",
             ),
-            ("set-options", Box::new(|st| st.tx_lock_account().map(|_| ())), ""),
+            (
+                "set-options",
+                Box::new(|st| st.tx_lock_account().map(|_| ())),
+                "",
+            ),
             (
                 "asset-deploy",
                 Box::new({
@@ -6712,15 +6716,42 @@ while :; do :; done
         let id = market_id();
         type Send = Box<dyn Fn(&Stellar<'_, FakeExecutor>) -> anyhow::Result<()>>;
         let sends: Vec<(&str, Send)> = vec![
-            ("create-account", Box::new(move |st| st.tx_create_account(&acct(G_DST), 1).map(|_| ()))),
-            ("change-trust", Box::new({ let a = a.clone(); move |st| st.tx_change_trust(&a, None) })),
-            ("payment", Box::new({ let a = a.clone(); move |st| st.tx_payment(&acct(G_DST), &a, 1).map(|_| ()) })),
-            ("set-options", Box::new(|st| st.tx_lock_account().map(|_| ()))),
-            ("asset-deploy", Box::new({ let a = a.clone(); move |st| st.asset_deploy(&a).map(|_| ()) })),
+            (
+                "create-account",
+                Box::new(move |st| st.tx_create_account(&acct(G_DST), 1).map(|_| ())),
+            ),
+            (
+                "change-trust",
+                Box::new({
+                    let a = a.clone();
+                    move |st| st.tx_change_trust(&a, None)
+                }),
+            ),
+            (
+                "payment",
+                Box::new({
+                    let a = a.clone();
+                    move |st| st.tx_payment(&acct(G_DST), &a, 1).map(|_| ())
+                }),
+            ),
+            (
+                "set-options",
+                Box::new(|st| st.tx_lock_account().map(|_| ())),
+            ),
+            (
+                "asset-deploy",
+                Box::new({
+                    let a = a.clone();
+                    move |st| st.asset_deploy(&a).map(|_| ())
+                }),
+            ),
         ];
         let _ = (&dst, &id);
         for (name, send) in &sends {
-            for stderr in ["error: bad gateway", "error: error sending request for url (http://rpc): connection reset"] {
+            for stderr in [
+                "error: bad gateway",
+                "error: error sending request for url (http://rpc): connection reset",
+            ] {
                 let fx = FakeExecutor::new(vec![resolve_ok(), FakeExecutor::fail(stderr)]);
                 assert!(send(&signed(&n, &fx)).is_err(), "{name}");
                 assert_eq!(fx.calls.borrow().len(), 2, "{name}: exactly one send, no replay");

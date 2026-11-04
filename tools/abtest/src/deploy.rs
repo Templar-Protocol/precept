@@ -4870,9 +4870,7 @@ impl MarketDeployer {
             // come from the account itself. The address is the one this run
             // created and the journal recorded, and its key lives only in this
             // run's keystore.
-            MOp::RealBackstopDeposit | MOp::SweepCustodian | MOp::BurnCustodian => {
-                self.custodian()
-            }
+            MOp::RealBackstopDeposit | MOp::SweepCustodian | MOp::BurnCustodian => self.custodian(),
             _ => {
                 self.progress.admin.clone().ok_or_else(|| {
                     anyhow!("the operator is unresolved, so no mutation is authorized")
@@ -5047,7 +5045,8 @@ impl MarketDeployer {
                     let _ = std::fs::remove_file(&tmp);
                     return Err(e);
                 }
-                std::fs::rename(&tmp, &file).map_err(|e| anyhow!("publishing the custodian seed: {e}"))?;
+                std::fs::rename(&tmp, &file)
+                    .map_err(|e| anyhow!("publishing the custodian seed: {e}"))?;
                 Self::seal_secret(&file)?;
                 sync_dir(&self.journal.out());
                 anyhow::ensure!(
@@ -5123,8 +5122,12 @@ impl MarketDeployer {
             "balance",
             &[kv("id", holder.as_str())],
         )?;
-        price_as_i128(&held)
-            .ok_or_else(|| anyhow!("the backing pool reports no balance for {}", holder.as_str()))
+        price_as_i128(&held).ok_or_else(|| {
+            anyhow!(
+                "the backing pool reports no balance for {}",
+                holder.as_str()
+            )
+        })
     }
 
     /// The LP this pool's backing has ever minted. The custodian must hold all
@@ -5154,7 +5157,12 @@ impl MarketDeployer {
         balance
             .get("shares")
             .and_then(price_as_i128)
-            .ok_or_else(|| anyhow!("the backstop reports no share balance for {}", holder.as_str()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "the backstop reports no share balance for {}",
+                    holder.as_str()
+                )
+            })
     }
 
     /// The permanent lock one of this run's own accounts is left in: master
@@ -5192,7 +5200,6 @@ impl MarketDeployer {
         );
         Ok(sent)
     }
-
 
     /// Execute one coordinate of a real market's graph, or `None` for the one
     /// coordinate the two graphs share (publication), whose arm lives with
@@ -6439,9 +6446,7 @@ impl MarketDeployer {
                         .tx_create_account(&custodian, MARKET_CUSTODIAN_FUND_STROOPS)?
                         .map(|hash| hash.as_str().to_string());
                     anyhow::ensure!(
-                        self.reader()
-                            .ledger_account(custodian.as_str())?
-                            .is_some(),
+                        self.reader().ledger_account(custodian.as_str())?.is_some(),
                         "the funded custodian account does not read back"
                     );
                 }
@@ -6620,8 +6625,9 @@ impl MarketDeployer {
                     anyhow::ensure!(
                         self.reader()
                             .ledger_account(custodian.as_str())?
-                            .is_some_and(|left| left.balance_stroops
-                                <= MARKET_CUSTODIAN_KEEP_STROOPS),
+                            .is_some_and(
+                                |left| left.balance_stroops <= MARKET_CUSTODIAN_KEEP_STROOPS
+                            ),
                         "the custodian's sweep did not leave it at its reserve"
                     );
                 }
@@ -6649,8 +6655,7 @@ impl MarketDeployer {
                     "the custodian still holds backing LP it has not placed; it cannot be burned yet"
                 );
                 let st = self.custodian_st(record)?;
-                let burned =
-                    self.ensure_account_burned("backstop custodian", &custodian, &st)?;
+                let burned = self.ensure_account_burned("backstop custodian", &custodian, &st)?;
                 // Inert on the ledger, the key signs nothing; both copies are
                 // deleted so no secret outlives the run. Addresses come from the
                 // journal, never this keystore, and an absent key is the goal.
@@ -7647,9 +7652,7 @@ impl MarketDeployer {
                 let Some(custodian) = custodian else {
                     return Ok(false);
                 };
-                self.reader()
-                    .ledger_account(custodian.as_str())?
-                    .is_some()
+                self.reader().ledger_account(custodian.as_str())?.is_some()
             }
             // The backing moved when the custodian holds every LP the pool's
             // backing ever minted. No other account can hold any of it, and no
@@ -7668,10 +7671,9 @@ impl MarketDeployer {
             // it — a pair of numbers no other submission explains, because the
             // custodian is an account only this run could have created.
             MOp::RealBackstopDeposit => {
-                let (Ok(backstop), Ok(pool)) = (
-                    self.deployed_id("backstop"),
-                    self.deployed_id("pool"),
-                ) else {
+                let (Ok(backstop), Ok(pool)) =
+                    (self.deployed_id("backstop"), self.deployed_id("pool"))
+                else {
                     return Ok(false);
                 };
                 let (Ok(custodian), Ok(total)) = (self.custodian(), self.comet_total_supply())
@@ -7697,9 +7699,7 @@ impl MarketDeployer {
                 };
                 self.reader()
                     .ledger_account(custodian.as_str())?
-                    .is_some_and(|account| {
-                        account.balance_stroops <= MARKET_CUSTODIAN_KEEP_STROOPS
-                    })
+                    .is_some_and(|account| account.balance_stroops <= MARKET_CUSTODIAN_KEEP_STROOPS)
             }
             // The burn is the account's own ledger entry, on the one predicate
             // the shim issuer's lock uses.
@@ -14752,7 +14752,11 @@ exit 1
         for (deployer_holds, expect_settled) in [("0", true), ("1", false)] {
             let market = a_real_market(&format!("custodian-from-{deployer_holds}"), false, false);
             let mut d = market.run(false);
-            let (backstop, pool, comet) = (fixture_contract(80), fixture_contract(81), fixture_contract(82));
+            let (backstop, pool, comet) = (
+                fixture_contract(80),
+                fixture_contract(81),
+                fixture_contract(82),
+            );
             market.arm_deployed(
                 &mut d,
                 [
@@ -14777,8 +14781,8 @@ exit 1
                     panic!("a custodian holding the whole backing was refused: {e:#}");
                 }
             }
-            let settled = outcome.is_ok()
-                && market.settled(&market.slot(&MOp::RealBackstopDeposit));
+            let settled =
+                outcome.is_ok() && market.settled(&market.slot(&MOp::RealBackstopDeposit));
             assert_eq!(
                 settled, expect_settled,
                 "a deployer holding {deployer_holds} of the backing must settle the deposit: {deployer_holds}"
@@ -14822,7 +14826,11 @@ exit 1
     fn a_run_resumed_after_the_sweep_sends_exactly_the_burn() {
         let market = a_real_market("custodian-resume-burn", false, false);
         let mut d = market.run(false);
-        let (backstop, pool, comet) = (fixture_contract(80), fixture_contract(81), fixture_contract(82));
+        let (backstop, pool, comet) = (
+            fixture_contract(80),
+            fixture_contract(81),
+            fixture_contract(82),
+        );
         market.arm_deployed(
             &mut d,
             [
@@ -14856,13 +14864,12 @@ exit 1
             assert!(market.settled(&market.slot(&op)), "{op:?} did not settle");
         }
         let before = market.calls();
-        let count = |needle: &str| {
-            before
-                .lines()
-                .filter(|line| line.contains(needle))
-                .count()
-        };
-        assert_eq!(count("tx new payment"), 1, "the sweep submitted exactly one payment");
+        let count = |needle: &str| before.lines().filter(|line| line.contains(needle)).count();
+        assert_eq!(
+            count("tx new payment"),
+            1,
+            "the sweep submitted exactly one payment"
+        );
         assert_eq!(count("tx new set-options"), 0, "nothing was burned yet");
 
         // A fresh process for the same run directory: the journal, not the
@@ -14901,7 +14908,10 @@ exit 1
         ] {
             assert_eq!(added(needle), 0, "a settled coordinate re-sent {needle:?}");
         }
-        assert!(market.settled(&market.slot(&MOp::BurnCustodian)), "the burn did not settle");
+        assert!(
+            market.settled(&market.slot(&MOp::BurnCustodian)),
+            "the burn did not settle"
+        );
         assert!(
             !market.out.join("backstop-custodian.seed").exists(),
             "a burned custodian's seed outlives its key"
@@ -14914,7 +14924,11 @@ exit 1
     fn a_run_resumed_after_the_burn_sends_nothing() {
         let market = a_real_market("custodian-resume-idle", false, false);
         let mut d = market.run(false);
-        let (backstop, pool, comet) = (fixture_contract(80), fixture_contract(81), fixture_contract(82));
+        let (backstop, pool, comet) = (
+            fixture_contract(80),
+            fixture_contract(81),
+            fixture_contract(82),
+        );
         market.arm_deployed(
             &mut d,
             [
@@ -14958,7 +14972,10 @@ exit 1
             .skip(before.lines().count())
             .filter(|line| line.contains("tx new set-options"))
             .count();
-        assert_eq!(sent, 0, "a custodian the ledger already burned was burned again");
+        assert_eq!(
+            sent, 0,
+            "a custodian the ledger already burned was burned again"
+        );
     }
 
     /// The custodian is an output of the run, never an input: the plan a PR
@@ -15087,7 +15104,10 @@ exit 1
             market.arm_custodian(&mut d, &custodian);
             market.arm_lp(&comet, &custodian, "1000000000");
             market.arm_lp(&comet, &deployer, "0");
-            market.arm(&format!("total-supply-{}", comet.as_str()), "\"1000000000\"");
+            market.arm(
+                &format!("total-supply-{}", comet.as_str()),
+                "\"1000000000\"",
+            );
             market.backstop_data(
                 &backstop,
                 "{\"tokens\":\"0\",\"blnd\":\"0\",\"usdc\":\"0\",\"q4w_pct\":\"0\"}",
