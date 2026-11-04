@@ -398,7 +398,10 @@ mod tests {
                     positions.collateral.get_unchecked(0),
                     positions.liabilities.get_unchecked(1),
                 );
-                assert!(balances.0 > previous.0 && balances.1 > previous.1, "round {round}");
+                assert!(
+                    balances.0 > previous.0 && balances.1 > previous.1,
+                    "round {round}"
+                );
                 previous = balances;
             }
         });
