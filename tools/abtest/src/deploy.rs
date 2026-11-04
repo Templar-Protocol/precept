@@ -1700,13 +1700,19 @@ pub(crate) const COMET_CLAIM_ATTEMPTS: u32 = 3;
 /// deadline for a whole launch rather than one per contract.
 pub(crate) const HANDOFF_TTL_LEDGERS: u32 = 172_800;
 
-/// The XLM the deployer puts on a fresh backstop custodian, in stroops: one
-/// base reserve (a custodian holds no trustline — the pool's backing is a
-/// Soroban token, not a classic asset) plus the fee of each of the three
-/// transactions the custodian signs itself, with room to spare. Every stroop
-/// above the reserve is swept back to the deployer before the burn, so this
-/// is a temporary hold, not a cost.
-pub(crate) const MARKET_CUSTODIAN_FUND_STROOPS: i64 = 12_000_000;
+/// The XLM the deployer puts on a fresh backstop custodian, in stroops. The
+/// deposit the custodian signs opens Soroban trustlines on its own account —
+/// the pool's LP and the reserve assets its backing stands for. Measured on
+/// testnet on 2026-11-04: the deposit transaction carries four `Contract`
+/// trustline entries, so a custodian holding one base reserve (the first
+/// guess) and one holding two were both refused with `TxInsufficientBalance`
+/// before the contract ever ran. The fund therefore covers the base reserve
+/// plus four sub-entry reserves and the fee of each of the three transactions
+/// the custodian signs itself, with room for a pool whose reserve set is one
+/// larger. Every stroop above the base reserve and the burn's fee is swept back
+/// to the deployer before the burn, so the excess is a temporary hold, not a
+/// cost: a run's whole outlay for a custodian stays just over one XLM.
+pub(crate) const MARKET_CUSTODIAN_FUND_STROOPS: i64 = 50_000_000;
 
 /// What the sweep leaves on the custodian, in stroops: its base reserve plus
 /// the fee of the burn it signs next and the fee of the sweep itself, so the
