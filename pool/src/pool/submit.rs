@@ -407,13 +407,14 @@ mod tests {
         });
     }
 
-    /// The cap still binds a genuinely new (reserve, side) entry.
+    /// The cap still binds a genuinely new (reserve, side) entry added on top of stored positions.
     #[test]
     #[should_panic(expected = "Error(Contract, #1208)")]
     fn test_submit_a_new_reserve_side_over_max_positions_panics() {
         let e = Env::default();
         e.mock_all_auths_allowing_non_root_auth();
         let (pool, looper, collateral_asset, borrow_asset) = setup_looping_pool(&e, 2);
+        e.host().set_invocation_resource_limits(None).unwrap();
         e.as_contract(&pool, || {
             let requests = vec![
                 &e,
@@ -427,6 +428,13 @@ mod tests {
                     address: borrow_asset.clone(),
                     amount: 1_0000000,
                 },
+            ];
+            let positions = execute_submit(&e, &looper, &looper, &looper, requests, false);
+            assert_eq!(positions.effective_count(), 2);
+
+            e.cost_estimate().budget().reset_unlimited();
+            let requests = vec![
+                &e,
                 Request {
                     request_type: RequestType::Borrow as u32,
                     address: collateral_asset.clone(),
