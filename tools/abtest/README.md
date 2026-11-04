@@ -649,7 +649,8 @@ config.
 
 A real run records the following in its manifest: the network label, every
 contract id, the per-asset oracle-proxy configuration, the synthetic-leg
-issuers and their classic asset codes, and the launch artifact pins used with
+issuers and their classic asset codes, the backstop custodian and the
+transaction that burned it, and the launch artifact pins used with
 where each came from. A pin came from either an operator-declared `live` pin or
 a local build whose bytes hashed to that digest.
 
@@ -663,14 +664,29 @@ them uploads and deploys them.
 command line. No mainnet send has happened. The testnet rehearsal is
 unfinished.
 
+### Backstop custody
+
+A run does not keep the market's backstop shares on the key that deployed it. It
+makes a fresh custodian keypair for the run, funds it 1.2 XLM, moves the pool's
+Comet LP to it with `comet.transfer`, and calls `backstop.deposit` from it. The
+custodian's leftover XLM is then swept back to the deploying key and the account
+is burned — `set_options` with master weight 0 and thresholds 1/1/1 — and the
+burn is read back before the run calls itself finished. Backstop shares are not
+transferable, so with no key left able to sign for that account nobody can ever
+queue or move the shares it holds, and the CI deployer key never held them. The
+custodian seed lives in the run directory as a 0600 file, so a runner that died
+partway can resume the same account instead of funding a second one. The manifest
+records the account as `backstop_custodian` and the transaction that burned it as
+`backstop_custodian_burn_tx`.
+
 ### Handing the market over
 
 A pool config may name an owner that is not the key running the deployment.
 `pool.admin` is the address the pool belongs to when the run is over, and
 `oracle.admin` the address the oracle contracts belong to; each is a strkey, an
-account (`G…`) or a contract (`C…`). The deploying key still signs every send —
-the configuration says who the market ends up belonging to, not who pays for
-the transaction. A target that is not on the network at all, an account with no
+account (`G…`) or a contract (`C…`). The deploying key still signs every hand-off
+send — the configuration says who the market ends up belonging to, not who pays
+for the transaction. A target that is not on the network at all, an account with no
 ledger entry or a contract that has never been deployed, is refused at preflight
 before anything is sent: the run would only meet it at the end.
 

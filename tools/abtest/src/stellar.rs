@@ -976,6 +976,39 @@ impl CmdOutput {
     pub(crate) fn transient(&self) -> bool {
         is_transient(self)
     }
+
+    /// The transaction this command submitted, when the CLI named it.
+    pub(crate) fn tx_hash(&self) -> Option<TxHash> {
+        tx_hash_in(self.stderr.pick())
+    }
+}
+
+/// The transaction hash the CLI announces on its stream before submitting
+/// (`Signing transaction: <hash>`, or `Transaction hash is <hash>`), parsed at
+/// the boundary into a `TxHash`. `None` when it said nothing of the kind: the
+/// hash is evidence for a manifest, never a fact a send depends on.
+fn tx_hash_in(stderr: &str) -> Option<TxHash> {
+    let mut announced = None;
+    for line in stderr.lines() {
+        if !(line.contains("Signing transaction:") || line.contains("Transaction hash is")) {
+            continue;
+        }
+        if let Some(hash) = line
+            .split_whitespace()
+            .last()
+            .and_then(|word| word.parse().ok())
+        {
+            announced = Some(hash);
+        }
+    }
+    announced
+}
+
+impl Invocation {
+    /// The transaction this invocation submitted, when the CLI named it.
+    pub(crate) fn tx_hash(&self) -> Option<TxHash> {
+        tx_hash_in(self.stderr.pick())
+    }
 }
 
 pub trait Executor {
@@ -2064,18 +2097,19 @@ impl<'a, E: Executor> Stellar<'a, E> {
         &self,
         destination: &AccountId,
         starting_balance_stroops: i64,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<TxHash>> {
         positive(starting_balance_stroops)?;
-        self.market_send(s(&[
-            "tx",
-            "new",
-            "create-account",
-            "--destination",
-            destination.as_str(),
-            "--starting-balance",
-            &starting_balance_stroops.to_string(),
-        ]))?;
-        Ok(())
+        Ok(self
+            .market_send(s(&[
+                "tx",
+                "new",
+                "create-account",
+                "--destination",
+                destination.as_str(),
+                "--starting-balance",
+                &starting_balance_stroops.to_string(),
+            ]))?
+            .tx_hash())
     }
 
     /// `tx new change-trust` on a classic `CODE:ISSUER` asset. `None`
@@ -2110,45 +2144,47 @@ impl<'a, E: Executor> Stellar<'a, E> {
         destination: &AccountId,
         asset: &str,
         amount_stroops: i64,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<TxHash>> {
         positive(amount_stroops)?;
         anyhow::ensure!(
             valid_asset(asset),
             "{}",
             Safe::literal("payment asset must be native or a classic CODE:ISSUER asset")
         );
-        self.market_send(s(&[
-            "tx",
-            "new",
-            "payment",
-            "--destination",
-            destination.as_str(),
-            "--asset",
-            asset,
-            "--amount",
-            &amount_stroops.to_string(),
-        ]))?;
-        Ok(())
+        Ok(self
+            .market_send(s(&[
+                "tx",
+                "new",
+                "payment",
+                "--destination",
+                destination.as_str(),
+                "--asset",
+                asset,
+                "--amount",
+                &amount_stroops.to_string(),
+            ]))?
+            .tx_hash())
     }
 
     /// Locks the pinned signer's own account the way the runbook does: one
     /// `set-options` with master weight zero and all three thresholds at
     /// one, so no key can move or remove the master.
-    pub fn tx_lock_account(&self) -> anyhow::Result<()> {
-        self.market_send(s(&[
-            "tx",
-            "new",
-            "set-options",
-            "--master-weight",
-            "0",
-            "--low-threshold",
-            "1",
-            "--med-threshold",
-            "1",
-            "--high-threshold",
-            "1",
-        ]))?;
-        Ok(())
+    pub fn tx_lock_account(&self) -> anyhow::Result<Option<TxHash>> {
+        Ok(self
+            .market_send(s(&[
+                "tx",
+                "new",
+                "set-options",
+                "--master-weight",
+                "0",
+                "--low-threshold",
+                "1",
+                "--med-threshold",
+                "1",
+                "--high-threshold",
+                "1",
+            ]))?
+            .tx_hash())
     }
 
     /// `contract asset deploy`: wraps `asset` and returns the contract id
@@ -6380,6 +6416,33 @@ while :; do :; done
     }
 
     #[test]
+    fn the_announced_transaction_hash_is_recorded_and_absent_stays_absent() {
+        let hash = "a".repeat(63) + "b";
+        let fx = FakeExecutor::new(vec![
+            resolve_ok(),
+            FakeExecutor::ok(
+                "",
+                &format!("⚙️  Building standalone transaction...\nSigning transaction: {hash}\n✅  Transaction submitted"),
+            ),
+        ]);
+        assert_eq!(
+            signed(&market_net(MAIN), &fx)
+                .tx_lock_account()
+                .unwrap()
+                .map(|h| h.as_str().to_string()),
+            Some(hash.clone())
+        );
+        assert_eq!(
+            tx_hash_in(&format!("Transaction hash is {hash}")).map(|h| h.as_str().to_string()),
+            Some(hash)
+        );
+        // No announcement is no evidence: nothing is invented for the manifest.
+        assert!(tx_hash_in("").is_none());
+        assert!(tx_hash_in("Transaction hash is not-a-hash").is_none());
+        assert!(tx_hash_in("Signing transaction: deadbeef").is_none());
+    }
+
+    #[test]
     fn market_tx_refuses_bad_inputs_and_unsigned_context_without_sending() {
         let n = market_net(MAIN);
         let dst = acct(G_DST);
@@ -6438,7 +6501,7 @@ while :; do :; done
         let sends: Vec<(&str, Send, &str)> = vec![
             (
                 "create-account",
-                Box::new(|st| st.tx_create_account(&acct(G_DST), 1)),
+                Box::new(|st| st.tx_create_account(&acct(G_DST), 1).map(|_| ())),
                 "",
             ),
             (
@@ -6453,11 +6516,11 @@ while :; do :; done
                 "payment",
                 Box::new({
                     let a = a.clone();
-                    move |st| st.tx_payment(&acct(G_DST), &a, 1)
+                    move |st| st.tx_payment(&acct(G_DST), &a, 1).map(|_| ())
                 }),
                 "",
             ),
-            ("set-options", Box::new(|st| st.tx_lock_account()), ""),
+            ("set-options", Box::new(|st| st.tx_lock_account().map(|_| ())), ""),
             (
                 "asset-deploy",
                 Box::new({
@@ -6649,10 +6712,10 @@ while :; do :; done
         let id = market_id();
         type Send = Box<dyn Fn(&Stellar<'_, FakeExecutor>) -> anyhow::Result<()>>;
         let sends: Vec<(&str, Send)> = vec![
-            ("create-account", Box::new(move |st| st.tx_create_account(&acct(G_DST), 1))),
+            ("create-account", Box::new(move |st| st.tx_create_account(&acct(G_DST), 1).map(|_| ()))),
             ("change-trust", Box::new({ let a = a.clone(); move |st| st.tx_change_trust(&a, None) })),
-            ("payment", Box::new({ let a = a.clone(); move |st| st.tx_payment(&acct(G_DST), &a, 1) })),
-            ("set-options", Box::new(|st| st.tx_lock_account())),
+            ("payment", Box::new({ let a = a.clone(); move |st| st.tx_payment(&acct(G_DST), &a, 1).map(|_| ()) })),
+            ("set-options", Box::new(|st| st.tx_lock_account().map(|_| ()))),
             ("asset-deploy", Box::new({ let a = a.clone(); move |st| st.asset_deploy(&a).map(|_| ()) })),
         ];
         let _ = (&dst, &id);

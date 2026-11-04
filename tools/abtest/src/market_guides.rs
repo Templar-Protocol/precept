@@ -229,14 +229,14 @@ const GUIDES: &[Guide] = &[
         action: "deposit",
         role: "backstop",
         method: "deposit",
-        help: "deposit backstop tokens for this market's pool, which is bound from this manifest; you supply from and amount.",
+        help: "deposit backstop tokens for this market's pool, which is bound from this manifest; you supply from and amount. A pool-config run makes this call itself, from a per-run custodian account it burns afterwards (master weight 0, thresholds 1/1/1): no key can sign for that account, so the shares it holds can never be queued or moved, and the deploying key never held them. The curator's two calls are unaffected.",
     },
     Guide {
         category: "backstop",
         action: "queue-withdrawal",
         role: "backstop",
         method: "queue_withdrawal",
-        help: "queue backstop shares of this market's pool for withdrawal. The lifecycle cannot be skipped: a queue is required before any withdrawal. You supply from and amount.",
+        help: "queue backstop shares of this market's pool for withdrawal. The lifecycle cannot be skipped: a queue is required before any withdrawal. You supply from and amount. The shares a pool-config run deposited are not queueable: their holder was burned with them.",
     },
     Guide {
         category: "backstop",
