@@ -5069,27 +5069,53 @@ impl MarketDeployer {
         ))
     }
 
-    /// Give this run its custodian: derive its key from this run's identity,
-    /// register it in the operator's keystore, and take the address the CLI
-    /// answers for the key it just stored — never an address this code
-    /// computed. The account itself is created by the funding that follows.
-    fn create_custodian_key(&self) -> anyhow::Result<(String, AccountId)> {
+    /// The key this run's custodian signs with, present in the operator's
+    /// keystore. Derived, never drawn: this run's identity is the only input,
+    /// so asking twice registers the same key, and a run resumed by another
+    /// process — or on another machine, with nothing but its journal — arrives
+    /// back at the account its journal recorded rather than at a stranger. The
+    /// address is always the CLI's own answer for the key it stored, never one
+    /// this code computed; once a custodian is recorded, a derivation that
+    /// answers another address refuses instead of moving the run's backing
+    /// onto an account no deposit was ever made from.
+    fn ensure_custodian_key(&self) -> anyhow::Result<(String, AccountId)> {
         let key = Self::custodian_key();
-        let secret = self.derive_custodian_secret()?;
         let keystore = self.keystore_st();
+        let recorded = self.progress.custodian.clone();
+        if let Some(want) = recorded.as_ref() {
+            if keystore.keys_public_key(&key)?.as_ref() == Some(want) {
+                return Ok((key, want.clone()));
+            }
+        }
+        let secret = self.derive_custodian_secret()?;
         keystore.keys_add_secret(&key, &secret)?;
         let address = keystore
             .keys_public_key(&key)?
             .ok_or_else(|| anyhow!("the derived custodian key does not resolve to an identity"))?;
+        if let Some(want) = recorded {
+            anyhow::ensure!(
+                address == want,
+                "the custodian key this run derives is not the account its journal recorded: \
+                 {} holds the backing, {} was recorded",
+                address,
+                want
+            );
+        }
         Ok((key, address))
+    }
+
+    /// Give this run its custodian: its key, in the keystore, and the address
+    /// the CLI answers for it. The account itself is created by the funding
+    /// that follows.
+    fn create_custodian_key(&self) -> anyhow::Result<(String, AccountId)> {
+        self.ensure_custodian_key()
     }
 
     /// The CLI seam bound to the backstop custodian — the only signer the
     /// backstop's `deposit` accepts for its own LP, and the only account that
-    /// can pay from itself or change its own options. The key lives in the
-    /// operator's keystore, derived from this run's identity, so a
-    /// pinned-signer refusal here means the keystore was rewritten underneath
-    /// the run.
+    /// can pay from itself or change its own options. The key is derived from
+    /// this run's identity and registered on demand, so a run whose keystore
+    /// was rewritten or lost still signs as the account its journal names.
     fn custodian_st(
         &self,
         record: &MarketCustodyRecord,
@@ -5099,7 +5125,11 @@ impl MarketDeployer {
             custodian == record.signer,
             "the frozen signer is not the run's backstop custodian"
         );
-        let alias = Self::custodian_key();
+        let (alias, address) = self.ensure_custodian_key()?;
+        anyhow::ensure!(
+            address == custodian,
+            "the keystore's custodian key is not the account that holds the backing"
+        );
         Ok(Stellar::new(&self.admin_net, &self.exec, Policy::Market)
             .with_market_signer(&alias, &custodian))
     }
@@ -15136,6 +15166,34 @@ exit 1
         assert_eq!(
             registered, derived_seed,
             "the registered key is not the key this run's id derives"
+        );
+        // The harder case, and the one the seed file used to answer: a run's
+        // keystore is not part of the run, so a resume on another machine has
+        // no trace of it. The run re-derives, re-registers, and arrives back
+        // at the account its journal says holds the backing.
+        std::fs::remove_file(
+            market
+                .state
+                .join(format!("key-{}", MarketDeployer::custodian_key())),
+        )
+        .expect("the keystore loses the identity");
+        std::fs::remove_file(
+            market
+                .state
+                .join(format!("secret-{}", MarketDeployer::custodian_key())),
+        )
+        .expect("the keystore loses the secret");
+        let (alias, again) = restored
+            .ensure_custodian_key()
+            .expect("a run with no keystore entry registers its own custodian");
+        assert_eq!(
+            alias,
+            MarketDeployer::custodian_key(),
+            "a re-registration used another key name"
+        );
+        assert_eq!(
+            again, made,
+            "a re-registered custodian is a different account than the one holding the shares"
         );
     }
 
