@@ -307,6 +307,133 @@ mod tests {
         vec, Symbol,
     };
 
+    /// Pool with two default reserves (`collateral_asset`, `borrow_asset`), both priced at 1,
+    /// `max_positions` as given, and a deep `borrow_asset` lender side.
+    fn setup_looping_pool(e: &Env, max_positions: u32) -> (Address, Address, Address, Address) {
+        e.ledger().set(LedgerInfo {
+            timestamp: 600,
+            protocol_version: 25,
+            sequence_number: 1234,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 10,
+            min_persistent_entry_ttl: 10,
+            max_entry_ttl: 3110400,
+        });
+        let bombadil = Address::generate(e);
+        let looper = Address::generate(e);
+        let pool = testutils::create_pool(e);
+        let (oracle, oracle_client) = testutils::create_mock_oracle(e);
+
+        let (collateral_asset, collateral_client) = testutils::create_token_contract(e, &bombadil);
+        let (reserve_config, reserve_data) = testutils::default_reserve_meta();
+        testutils::create_reserve(e, &pool, &collateral_asset, &reserve_config, &reserve_data);
+
+        let (borrow_asset, borrow_client) = testutils::create_token_contract(e, &bombadil);
+        let (reserve_config, mut reserve_data) = testutils::default_reserve_meta();
+        reserve_data.b_supply = 100_000_0000000;
+        testutils::create_reserve(e, &pool, &borrow_asset, &reserve_config, &reserve_data);
+
+        collateral_client.mint(&looper, &10_000_0000000);
+        collateral_client.mint(&pool, &10_000_0000000);
+        borrow_client.mint(&pool, &100_000_0000000);
+        oracle_client.set_data(
+            &bombadil,
+            &Asset::Other(Symbol::new(e, "USD")),
+            &vec![
+                e,
+                Asset::Stellar(collateral_asset.clone()),
+                Asset::Stellar(borrow_asset.clone()),
+            ],
+            &7,
+            &300,
+        );
+        oracle_client.set_price_stable(&vec![e, 1_0000000, 1_0000000]);
+        e.as_contract(&pool, || {
+            storage::set_pool_config(
+                e,
+                &PoolConfig {
+                    oracle,
+                    min_collateral: 0,
+                    bstop_rate: 0,
+                    status: 0,
+                    max_positions,
+                },
+            );
+        });
+        (pool, looper, collateral_asset, borrow_asset)
+    }
+
+    /// `max_positions` counts distinct (reserve, side) entries, not actions: a user who loops
+    /// supply-collateral + borrow of the same two assets stays at two positions however many
+    /// times they repeat it, so a cap of 2 never binds them.
+    #[test]
+    fn test_submit_looping_the_same_pair_never_adds_positions() {
+        let e = Env::default();
+        e.mock_all_auths_allowing_non_root_auth();
+        let (pool, looper, collateral_asset, borrow_asset) = setup_looping_pool(&e, 2);
+        // Each loop is its own transaction on a real network; the test host would otherwise
+        // add every loop's footprint and budget to one invocation.
+        e.host().set_invocation_resource_limits(None).unwrap();
+        e.as_contract(&pool, || {
+            let mut previous = (0, 0);
+            for round in 1..=10u32 {
+                e.cost_estimate().budget().reset_unlimited();
+                let requests = vec![
+                    &e,
+                    Request {
+                        request_type: RequestType::SupplyCollateral as u32,
+                        address: collateral_asset.clone(),
+                        amount: 10_0000000,
+                    },
+                    Request {
+                        request_type: RequestType::Borrow as u32,
+                        address: borrow_asset.clone(),
+                        amount: 1_0000000,
+                    },
+                ];
+                let positions = execute_submit(&e, &looper, &looper, &looper, requests, false);
+                assert_eq!(positions.effective_count(), 2, "round {round}");
+                let balances = (
+                    positions.collateral.get_unchecked(0),
+                    positions.liabilities.get_unchecked(1),
+                );
+                assert!(balances.0 > previous.0 && balances.1 > previous.1, "round {round}");
+                previous = balances;
+            }
+        });
+    }
+
+    /// The cap still binds a genuinely new (reserve, side) entry.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #1208)")]
+    fn test_submit_a_new_reserve_side_over_max_positions_panics() {
+        let e = Env::default();
+        e.mock_all_auths_allowing_non_root_auth();
+        let (pool, looper, collateral_asset, borrow_asset) = setup_looping_pool(&e, 2);
+        e.as_contract(&pool, || {
+            let requests = vec![
+                &e,
+                Request {
+                    request_type: RequestType::SupplyCollateral as u32,
+                    address: collateral_asset.clone(),
+                    amount: 100_0000000,
+                },
+                Request {
+                    request_type: RequestType::Borrow as u32,
+                    address: borrow_asset.clone(),
+                    amount: 1_0000000,
+                },
+                Request {
+                    request_type: RequestType::Borrow as u32,
+                    address: collateral_asset.clone(),
+                    amount: 1_0000000,
+                },
+            ];
+            execute_submit(&e, &looper, &looper, &looper, requests, false);
+        });
+    }
+
     #[test]
     fn test_submit() {
         let e = Env::default();
