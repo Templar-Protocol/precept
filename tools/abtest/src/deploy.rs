@@ -5110,6 +5110,20 @@ impl MarketDeployer {
         Ok((key, address))
     }
 
+    /// Take the custodian's key out of the operator's keystore. The burn's
+    /// last act is not a chain effect, so it belongs with the *effect* and
+    /// not with the submission that happened to produce it: asked from the
+    /// coordinate when the run sends the burn, and from the reconciliation
+    /// when the chain already answers that the account is inert — a run that
+    /// resumes into a burn it cannot take credit for still owes the keystore
+    /// the removal. A secret left behind for an account that can never sign
+    /// again is a secret nothing will ever need and nobody will think to
+    /// delete. Removing a key that is not there is the same answer as
+    /// removing it.
+    fn retire_custodian_key(&self) -> anyhow::Result<()> {
+        self.keystore_st().keys_remove(&self.custodian_key())
+    }
+
     /// Give this run its custodian: its key, in the keystore, and the address
     /// the CLI answers for it. The account itself is created by the funding
     /// that follows.
@@ -6686,7 +6700,7 @@ impl MarketDeployer {
                 // nothing — any process that can read the journal can derive it
                 // again — and no secret outlives a run whose custodian is
                 // finished. Addresses come from the journal, never a keystore.
-                self.keystore_st().keys_remove(&self.custodian_key())?;
+                self.retire_custodian_key()?;
                 step(
                     "the custodian can never sign again: master weight zero, thresholds one, no signers",
                     None,
@@ -7946,6 +7960,16 @@ impl MarketDeployer {
         record: &MarketCustodyRecord,
         op: Option<&MOp>,
     ) -> anyhow::Result<()> {
+        // A coordinate settled by reconciliation never reaches the arm that
+        // would have cleaned up after it, so the one cleanup a settled effect
+        // still owes is asked here. Only the burn owes one: its account is
+        // inert whether this run submitted the transaction or not, and its key
+        // — derived, reproducible, and now useless — must not outlive it in
+        // the operator's keystore. Refusing here leaves the coordinate open,
+        // which is the direction this may err in.
+        if matches!(op, Some(MOp::BurnCustodian)) {
+            self.retire_custodian_key()?;
+        }
         // The facts this coordinate's own execution would have written are
         // written here too. A propose reconciled without its proposal id
         // would settle the coordinate and still leave the execute behind it
@@ -15093,6 +15117,93 @@ exit 1
         assert_eq!(
             sent, 0,
             "a custodian the ledger already burned was burned again"
+        );
+    }
+
+    /// The other way a burn finishes: the transaction landed and the runner
+    /// died before the journal could record it. The resume reads the account,
+    /// finds it inert, and settles the coordinate — and the keystore is still
+    /// emptied, exactly as the coordinate's own execution would have left it.
+    /// The cleanup belongs to the effect, not to the submission that happened
+    /// to produce it: a secret behind an account that can never sign again is
+    /// a secret nothing will ever need and nobody will think to delete.
+    #[test]
+    fn a_burn_reconciled_from_the_chain_takes_its_key_with_it() {
+        let market = a_real_market("custodian-burn-reconciled", true, false);
+        let mut d = market.run(false);
+        let (backstop, pool, comet) = (
+            fixture_contract(80),
+            fixture_contract(81),
+            fixture_contract(82),
+        );
+        market.arm_deployed(
+            &mut d,
+            [
+                ("backstop", backstop.clone()),
+                ("pool", pool.clone()),
+                ("comet", comet.clone()),
+            ],
+        );
+        let custodian = fixture_actor(76);
+        let deployer = d.progress.admin.clone().expect("the operator is resolved");
+        market.arm_custodian(&mut d, &custodian);
+        let alias = d.custodian_key();
+        market.arm_lp(&comet, &deployer, "1000000000");
+        market.arm(
+            &format!("total-supply-{}", comet.as_str()),
+            "\"1000000000\"",
+        );
+        arm_deposit_readback(&market, &backstop);
+        for op in [
+            MOp::FundCustodian,
+            MOp::MoveBacking,
+            MOp::RealBackstopDeposit,
+            MOp::SweepCustodian,
+        ] {
+            market
+                .confirm(&mut d, &op)
+                .unwrap_or_else(|e| panic!("{op:?} owed nothing: {e:#}"));
+        }
+        assert_eq!(
+            d.keystore_st()
+                .keys_public_key(&alias)
+                .ok()
+                .flatten()
+                .as_ref(),
+            Some(&custodian),
+            "the run had registered its key with the operator's keystore"
+        );
+        // The burn is on the network; the journal never heard about it. This
+        // is the state a resume meets, not one this run could have reached by
+        // executing its own coordinate.
+        market.arm(&format!("account-{}", custodian.as_str()), "locked");
+        let (slot, record, _) = market.open_gate_armed(
+            &MOp::BurnCustodian,
+            [
+                ("backstop", backstop.clone()),
+                ("pool", pool.clone()),
+                ("comet", comet.clone()),
+            ],
+        );
+        market
+            .journal()
+            .begin(slot.phase, slot.slot, &record)
+            .expect("the burn was reserved");
+        d.reconcile_pending(slot.phase, slot.slot, &record)
+            .expect("the inert account settles the coordinate");
+        assert!(
+            market.settled(&slot),
+            "a burn the ledger already proves was left open: {}",
+            market.calls()
+        );
+        assert_eq!(
+            d.keystore_st().keys_public_key(&alias).ok().flatten(),
+            None,
+            "a burn settled by reconciliation left the custodian's key in the operator's keystore"
+        );
+        assert!(
+            !market.state.join(format!("secret-{alias}")).is_file(),
+            "a burn settled by reconciliation left the custodian's secret in the keystore"
         );
     }
 
