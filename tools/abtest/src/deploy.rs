@@ -311,6 +311,10 @@ pub(crate) fn keccak256(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 const STRKEY_G: u8 = 0x30; // ed25519 account
 const STRKEY_C: u8 = 2 << 3; // contract (first character must encode 'C')
+/// The strkey version byte of an ed25519 secret seed (`S…`). A derived
+/// custodian key is written as one of these so the CLI's own keystore can
+/// hold it; the bytes behind it are the raw 32-byte seed.
+pub(crate) const STRKEY_SECRET_SEED: u8 = 0x90;
 const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 /// RFC 4648 base32, no padding (the strkey encoding).
@@ -362,7 +366,7 @@ fn crc16_xmodem(data: &[u8]) -> u16 {
 
 /// Strkey encode: version byte, payload, CRC-16 checksum appended low-byte
 /// first (little-endian), base32.
-fn strkey_encode(version: u8, payload: &[u8]) -> String {
+pub(crate) fn strkey_encode(version: u8, payload: &[u8]) -> String {
     let mut data = Vec::with_capacity(payload.len() + 3);
     data.push(version);
     data.extend_from_slice(payload);
@@ -372,7 +376,7 @@ fn strkey_encode(version: u8, payload: &[u8]) -> String {
 }
 
 /// Strkey decode with checksum validation: (version, payload) or `None`.
-fn strkey_decode(s: &str) -> Option<(u8, Vec<u8>)> {
+pub(crate) fn strkey_decode(s: &str) -> Option<(u8, Vec<u8>)> {
     let mut buffer: u32 = 0;
     let mut bits: u32 = 0;
     let mut data = Vec::with_capacity(s.len() * 5 / 8);
@@ -409,6 +413,36 @@ fn strkey_decode(s: &str) -> Option<(u8, Vec<u8>)> {
     let (body, crc) = data.split_at(data.len() - 2);
     let expect = u16::from_le_bytes([*crc.first()?, *crc.get(1)?]);
     (crc16_xmodem(body) == expect).then(|| (body[0], body[1..].to_vec()))
+}
+
+/// HMAC-SHA256 (RFC 2104) over the SHA-256 this crate already carries: the
+/// key is padded or hashed to the 64-byte block, and the inner and outer
+/// hashes differ only by the `0x36` / `0x5c` pad. Pinned against RFC 4231
+/// case 2, so a wrong pad, a wrong block size, or a reversed order cannot
+/// pass.
+pub(crate) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut key_bytes: Vec<u8> = if key.len() > 64 {
+        hex32(&sha256_hex(key)).expect("sha256 hex").to_vec()
+    } else {
+        key.to_vec()
+    };
+    key_bytes.resize(64, 0);
+    let inner: Vec<u8> = key_bytes
+        .iter()
+        .map(|byte| byte ^ 0x36)
+        .chain(message.iter().copied())
+        .collect();
+    let outer: Vec<u8> = key_bytes
+        .iter()
+        .map(|byte| byte ^ 0x5c)
+        .chain(
+            hex32(&sha256_hex(&inner))
+                .expect("sha256 hex")
+                .iter()
+                .copied(),
+        )
+        .collect();
+    hex32(&sha256_hex(&outer)).expect("sha256 hex")
 }
 
 /// The market's network id: sha256 of the network passphrase. This is the
@@ -1585,9 +1619,10 @@ pub(crate) enum MOp {
     RealSetReserve {
         asset: usize,
     },
-    /// Create this run's backstop custodian key: a fresh ed25519 keypair in
-    /// this run's own keystore, whose seed is copied beside the journal at
-    /// 0600 so a run whose runner died can re-import it. Submits nothing to
+    /// Create this run's backstop custodian key: the run's identity, keyed
+    /// under the custodian domain and registered in the operator's keystore
+    /// with `keys add`. Nothing is drawn, so a runner that died arrives at the
+    /// same key, and the run directory holds none of it. Submits nothing to
     /// the chain, so an open intent here is archived and run again.
     CreateCustodian,
     /// `create-account`: the deployer funds the custodian with its base
@@ -1713,6 +1748,12 @@ pub(crate) const HANDOFF_TTL_LEDGERS: u32 = 172_800;
 /// to the deployer before the burn, so the excess is a temporary hold, not a
 /// cost: a run's whole outlay for a custodian stays just over one XLM.
 pub(crate) const MARKET_CUSTODIAN_FUND_STROOPS: i64 = 50_000_000;
+
+/// The domain the custodian's key is derived under. A key derived under
+/// another label is another custodian, so this string is a law, not a
+/// default: changing it orphans every custodian already holding a pool's
+/// backing, and nothing can move those shares afterwards.
+pub(crate) const MARKET_CUSTODIAN_DERIVATION_LABEL: &str = "precept-backstop-custodian:";
 
 /// What the sweep leaves on the custodian, in stroops: its base reserve plus
 /// the fee of the burn it signs next and the fee of the sweep itself, so the
@@ -4977,130 +5018,76 @@ impl MarketDeployer {
             .ok_or_else(|| anyhow!("the backstop custodian is unresolved"))
     }
 
-    /// The keystore name of this run's custodian key. Per-run like a leg's
-    /// issuer's, so two markets never share a holder, and a name carries no
-    /// secret.
+    /// The keystore name of this run's custodian key. Named per-run like a
+    /// leg issuer's; the key behind it is derived, so the name identifies the
+    /// one key this run's identity implies.
     fn custodian_key() -> String {
         "market-backstop-custodian".to_string()
     }
 
-    /// Where the custodian's seed is kept for the length of the run: beside
-    /// the journal, inside the run directory, which is exactly what the
-    /// journal's mirror copies to durable storage. The keystore entry is a
-    /// signing cache; this file is the custody, and it is the one a run whose
-    /// runner died re-imports from.
-    fn custodian_seed_file(&self) -> PathBuf {
-        self.journal.out().join("backstop-custodian.seed")
+    /// The message the custodian's key is derived from: the domain label, then
+    /// this run's identity — the nonce its frozen plan was built with, the
+    /// digest of the configuration it was frozen from, and the network. The
+    /// reviewer chooses none of it, the plan binds none of it, and a different
+    /// run id is a different custodian.
+    fn custodian_derivation_message(&self) -> String {
+        format!(
+            "{}{:016x}:{}:{}",
+            MARKET_CUSTODIAN_DERIVATION_LABEL,
+            self.nonce,
+            market_config_digest(&self.cfg).unwrap_or_else(|_| "0".repeat(64)),
+            self.cfg
+                .network()
+                .map(|network| network.label())
+                .unwrap_or(MARKET_NETWORK_LABEL),
+        )
     }
 
-    /// The keystore's own copy of the custodian key.
-    fn custodian_key_file(&self) -> PathBuf {
-        self.actor_net
-            .config_dir
-            .join("identity")
-            .join(format!("{}.toml", Self::custodian_key()))
+    /// The CLI seam over the operator's own config dir: where the deployer's
+    /// identity lives, and the only place a custodian's private key is ever
+    /// written. The run directory holds the journal and no key material.
+    fn keystore_st(&self) -> Stellar<'_, RealExecutor> {
+        Stellar::new(&self.admin_net, &self.exec, Policy::Market)
     }
 
-    /// Seal a file holding a secret so it is never world-readable — including
-    /// after a restore from the journal's mirror, which is free to hand back
-    /// whatever mode the stored object carried.
-    fn seal_secret(path: &Path) -> anyhow::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| anyhow!("sealing {}: {e}", path.display()))
+    /// The custodian's key: HMAC-SHA256 keyed by the deployer identity's own
+    /// secret and messaged by this run's identity. One secret the CI job
+    /// already holds is enough to re-derive the custodian in any process that
+    /// can read the journal, so nothing has to be kept in the run directory
+    /// for a dead runner's sake — and the deployer's secret, which is its
+    /// signing power, is never rendered by this code.
+    fn derive_custodian_secret(&self) -> anyhow::Result<String> {
+        let seed = self
+            .keystore_st()
+            .keys_secret(self.ctx.admin_alias())
+            .map_err(|_| {
+                anyhow!("the deployer identity's key is not available to derive a custodian")
+            })?;
+        Ok(strkey_encode(
+            STRKEY_SECRET_SEED,
+            &hmac_sha256(&seed, self.custodian_derivation_message().as_bytes()),
+        ))
     }
 
-    /// Copy the generated custodian seed beside the journal at 0600, creating
-    /// it once. An existing copy is compared against the keystore's bytes
-    /// rather than rewritten: a run directory carrying someone else's
-    /// custodian key is a refusal, not a second chance.
-    fn persist_custodian_seed(&self) -> anyhow::Result<()> {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt;
-        let seed = std::fs::read(self.custodian_key_file())
-            .map_err(|_| anyhow!("the custodian's key is not in this run's keystore"))?;
-        let file = self.custodian_seed_file();
-        match std::fs::read(&file) {
-            // Replaying this coordinate re-presents the same key, so the
-            // bytes must agree; anything else is a different custodian.
-            Ok(existing) => anyhow::ensure!(
-                existing == seed,
-                "the custodian seed in this run directory is not the key this run generated"
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let tmp = self.journal.out().join(format!(
-                    "backstop-custodian.seed.{}.tmp",
-                    std::process::id()
-                ));
-                let written = || -> anyhow::Result<()> {
-                    let mut handle = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .mode(0o600)
-                        .open(&tmp)
-                        .map_err(|e| anyhow!("creating the custodian seed staging file: {e}"))?;
-                    handle
-                        .write_all(&seed)
-                        .map_err(|e| anyhow!("writing the custodian seed: {e}"))?;
-                    handle
-                        .sync_all()
-                        .map_err(|e| anyhow!("syncing the custodian seed: {e}"))?;
-                    Ok(())
-                }();
-                if let Err(e) = written {
-                    let _ = std::fs::remove_file(&tmp);
-                    return Err(e);
-                }
-                std::fs::rename(&tmp, &file)
-                    .map_err(|e| anyhow!("publishing the custodian seed: {e}"))?;
-                Self::seal_secret(&file)?;
-                sync_dir(&self.journal.out());
-                anyhow::ensure!(
-                    std::fs::read(&file).is_ok_and(|bytes| bytes == seed),
-                    "the custodian seed is unreadable after publication"
-                );
-            }
-            Err(e) => return Err(anyhow!("reading the custodian seed: {e}")),
-        }
-        // The keystore copy is the one the CLI signs with; seal it too, since
-        // a restored run may have written it with any mode.
-        Self::seal_secret(&self.custodian_key_file())
-    }
-
-    /// Make this run's keystore hold its custodian key again. The ordinary
-    /// case is that it never lost it; the recovery case is a run directory
-    /// restored from the journal's mirror, where the seed came back and the
-    /// keystore did not. The restored key must resolve to the address the
-    /// journal recorded, so a substituted key is refused here rather than at
-    /// the first send that needed it.
-    fn restore_custodian_key(&self) -> anyhow::Result<()> {
-        let name = Self::custodian_key();
-        let reader = self.reader();
-        if reader.keys_public_key(&name)?.is_some() {
-            return Self::seal_secret(&self.custodian_key_file());
-        }
-        let want = self.custodian()?;
-        let seed = std::fs::read(self.custodian_seed_file())
-            .map_err(|_| anyhow!("neither this run's keystore nor its run directory holds the custodian's key; the backing it holds can never be moved by anyone, which is the intended end state but not this run's"))?;
-        let key = self.custodian_key_file();
-        std::fs::create_dir_all(key.parent().unwrap_or(&self.actor_net.config_dir))
-            .map_err(|e| anyhow!("creating the keystore for the restored custodian key: {e}"))?;
-        std::fs::write(&key, &seed).map_err(|e| anyhow!("restoring the custodian key: {e}"))?;
-        Self::seal_secret(&key)?;
-        let restored = reader
-            .keys_public_key(&name)?
-            .ok_or_else(|| anyhow!("the restored custodian key does not resolve to an identity"))?;
-        anyhow::ensure!(
-            restored == want,
-            "the custodian key restored from this run's seed is not the account the journal recorded"
-        );
-        Ok(())
+    /// Give this run its custodian: derive its key from this run's identity,
+    /// register it in the operator's keystore, and take the address the CLI
+    /// answers for the key it just stored — never an address this code
+    /// computed. The account itself is created by the funding that follows.
+    fn create_custodian_key(&self) -> anyhow::Result<(String, AccountId)> {
+        let key = Self::custodian_key();
+        let secret = self.derive_custodian_secret()?;
+        let keystore = self.keystore_st();
+        keystore.keys_add_secret(&key, &secret)?;
+        let address = keystore
+            .keys_public_key(&key)?
+            .ok_or_else(|| anyhow!("the derived custodian key does not resolve to an identity"))?;
+        Ok((key, address))
     }
 
     /// The CLI seam bound to the backstop custodian — the only signer the
     /// backstop's `deposit` accepts for its own LP, and the only account that
-    /// can pay from itself or change its own options. The key lives in this
-    /// run's own keystore and its address is the one this run created, so a
+    /// can pay from itself or change its own options. The key lives in the
+    /// operator's keystore, derived from this run's identity, so a
     /// pinned-signer refusal here means the keystore was rewritten underneath
     /// the run.
     fn custodian_st(
@@ -5112,9 +5099,8 @@ impl MarketDeployer {
             custodian == record.signer,
             "the frozen signer is not the run's backstop custodian"
         );
-        self.restore_custodian_key()?;
         let alias = Self::custodian_key();
-        Ok(Stellar::new(&self.actor_net, &self.exec, Policy::Market)
+        Ok(Stellar::new(&self.admin_net, &self.exec, Policy::Market)
             .with_market_signer(&alias, &custodian))
     }
 
@@ -6412,27 +6398,24 @@ impl MarketDeployer {
                 )
             }
             MOp::CreateCustodian => {
-                // The key is made in this run's own keystore before anything
-                // exists on the network: it *is* the address the custodian
-                // will have, and generating a key that exists reports it
-                // without overwriting, so this coordinate can be replayed. The
-                // seed is copied beside the journal at 0600 — the keystore is a
-                // signing cache, the run directory is the custody a dead runner
-                // restores — and nothing here submits anything to a chain.
-                let local = self.reader();
-                let custodian = local.keys_generate_local(&Self::custodian_key())?;
+                // The key is derived from this run's identity and registered in
+                // the operator's keystore — no random choice for a dead runner
+                // to lose, no secret for the run directory to keep, and the
+                // same journal always implies the same custodian. Nothing here
+                // submits anything to a chain.
+                let (key, custodian) = self.create_custodian_key()?;
                 if let Some(known) = self.progress.custodian.as_ref() {
                     anyhow::ensure!(
                         known == &custodian,
                         "this run already created a different backstop custodian"
                     );
                 }
-                self.persist_custodian_seed()?;
                 self.progress.custodian = Some(custodian.clone());
                 step(
-                    "the custodian's key exists in this run's keystore and its seed is in the run directory at 0600",
+                    "the custodian's key is derived from this run's identity and registered in the operator's keystore",
                     None,
                     json!({"phase": slot.phase, "slot": slot.slot,
+                           "key": key,
                            "custodian": custodian.as_str()}),
                 )
             }
@@ -6662,11 +6645,12 @@ impl MarketDeployer {
                 );
                 let st = self.custodian_st(record)?;
                 let burned = self.ensure_account_burned("backstop custodian", &custodian, &st)?;
-                // Inert on the ledger, the key signs nothing; both copies are
-                // deleted so no secret outlives the run. Addresses come from the
-                // journal, never this keystore, and an absent key is the goal.
+                // Inert on the ledger, and the key is deleted from the keystore:
+                // it is derived from this run's identity, so removing it costs
+                // nothing — any process that can read the journal can derive it
+                // again — and no secret outlives a run whose custodian is
+                // finished. Addresses come from the journal, never a keystore.
                 self.reader().keys_remove(&Self::custodian_key())?;
-                let _ = std::fs::remove_file(self.custodian_seed_file());
                 step(
                     "the custodian can never sign again: master weight zero, thresholds one, no signers",
                     None,
@@ -7667,35 +7651,36 @@ impl MarketDeployer {
                 let Ok(custodian) = self.custodian() else {
                     return Ok(false);
                 };
-                match (self.comet_total_supply(), self.comet_balance(&custodian)) {
-                    (Ok(total), Ok(held)) => total > 0 && held >= total,
-                    _ => false,
-                }
+                // A read that failed is not a read that found nothing: this
+                // coordinate moves value, so the only answer that may send it
+                // again is one the chain actually gave.
+                let total = self.comet_total_supply()?;
+                let held = self.comet_balance(&custodian)?;
+                total > 0 && held >= total
             }
             // The deposit is attributable when the backstop holds the LP this
             // pool's backing minted *and* the custodian holds the shares for
             // it — a pair of numbers no other submission explains, because the
             // custodian is an account only this run could have created.
             MOp::RealBackstopDeposit => {
-                let (Ok(backstop), Ok(pool)) =
-                    (self.deployed_id("backstop"), self.deployed_id("pool"))
-                else {
+                let (Ok(backstop), Ok(pool), Ok(custodian)) = (
+                    self.deployed_id("backstop"),
+                    self.deployed_id("pool"),
+                    self.custodian(),
+                ) else {
                     return Ok(false);
                 };
-                let (Ok(custodian), Ok(total)) = (self.custodian(), self.comet_total_supply())
-                else {
-                    return Ok(false);
-                };
-                let Ok(shares) = self.backstop_shares(&custodian) else {
-                    return Ok(false);
-                };
-                total > 0
-                    && shares > 0
-                    && self
-                        .backstop_pool_data(&backstop, &pool)
-                        .ok()
-                        .and_then(|data| data.get("tokens").and_then(price_as_i128))
-                        .is_some_and(|held| held >= total)
+                // The same law as the transfer above, and for the same reason:
+                // an unavailable answer leaves the intent unresolved, where a
+                // settled false would pay the LP into the pool a second time.
+                let total = self.comet_total_supply()?;
+                let shares = self.backstop_shares(&custodian)?;
+                let held = self
+                    .backstop_pool_data(&backstop, &pool)?
+                    .get("tokens")
+                    .and_then(price_as_i128)
+                    .unwrap_or_default();
+                total > 0 && shares > 0 && held >= total
             }
             // The sweep is the balance: nothing above the reserve and the fee
             // of the burn it still owes is left for it to send.
@@ -11290,11 +11275,39 @@ if [ "$1" = keys ] && [ "$2" = public-key ]; then
     printf 'no identity of this name\n' >&2
     exit 1
 fi
+if [ "$1" = keys ] && [ "$2" = secret ]; then
+    # The deployer's secret is the key material every custodian key is derived
+    # from. An armed `secret-<name>` answers; otherwise the stand-in's own
+    # generated keypair does, so the derivation is exercised on a real strkey
+    # rather than on a made-up one.
+    f="$S/secret-$3"
+    if [ -f "$f" ]; then cat "$f"; printf '\n'; exit 0; fi
+    printf 'SBFX5IWELBNITDDWNJT2YR6Y7GLEYROP434SNAQ3QJXTBGNGGDL3CJMT\n'
+    exit 0
+fi
+if [ "$1" = keys ] && [ "$2" = add ]; then
+    # A derived key arrives with its secret on stdin, exactly as the CLI takes
+    # it — the secret never reaches the argv the call log records — and the
+    # address the run will hold comes from the armed `gen-<name>`, which is
+    # what the CLI would derive from those bytes.
+    name=$3
+    cfg=$(arg --config-dir "$@")
+    secret=$(cat)
+    [ -n "$secret" ] || { printf 'no secret was given on stdin\n' >&2; exit 1; }
+    printf '%s' "$secret" > "$S/secret-$name"
+    mkdir -p "$cfg/identity"
+    printf 'seed_phrase = "derived key registered from stdin"\n' > "$cfg/identity/$name.toml"
+    chmod 600 "$cfg/identity/$name.toml"
+    if [ ! -f "$S/key-$name" ] && [ -f "$S/gen-$name" ]; then
+        cat "$S/gen-$name" > "$S/key-$name"
+    fi
+    exit 0
+fi
 if [ "$1" = keys ] && [ "$2" = generate ]; then
     # A generated key is real state: the address the run will hold comes from
     # an armed `gen-<name>` (a test decides what the network will derive), and
     # the keystore file is written as the CLI writes it — a 0600 identity under
-    # the config dir, which is what a run's seed custody copies and restores.
+    # the config dir, which is where a generated key lives and nothing else.
     name=$3
     cfg=$(arg --config-dir "$@")
     f="$S/gen-$name"
@@ -12170,11 +12183,10 @@ exit 1
         }
 
         /// The run's backstop custodian, arrived at the way a run arrives at
-        /// it: the coordinate is executed, its key is generated in the run's
-        /// own keystore, its seed is written beside the journal, and its
-        /// address is settled into the journal — so every deployer that
-        /// rebuilds from this run directory afterwards knows who holds the
-        /// backing, exactly as a resumed one would.
+        /// it: the coordinate is executed, its derived key is registered in the
+        /// run's own keystore, and its address is settled into the journal — so
+        /// every deployer that rebuilds from this run directory afterwards knows
+        /// who holds the backing, exactly as a resumed one would.
         fn arm_custodian(&self, d: &mut MarketDeployer, custodian: &AccountId) {
             self.arm(
                 &format!("gen-{}", MarketDeployer::custodian_key()),
@@ -14918,9 +14930,46 @@ exit 1
             market.settled(&market.slot(&MOp::BurnCustodian)),
             "the burn did not settle"
         );
+        // The run directory keeps no key material. What a run writes for itself
+        // — the frozen plan, the manifest, the settled coordinates, and the
+        // tree the CI job mirrors to the bucket — is its journal, and after the
+        // burn it is worthless. The custodian's key is a function of the run's
+        // identity and lives only in the operator's keystore, which is not part
+        // of the run.
+        let mut pending = vec![market.out.join("market-pending")];
+        let mut journal = Vec::new();
+        for entry in std::fs::read_dir(&market.out).expect("the run directory reads") {
+            let path = entry.expect("an entry").path();
+            if path.is_file() && path != market.stellar {
+                journal.push(path);
+            }
+        }
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("the journal reads") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    journal.push(path);
+                }
+            }
+        }
+        let mut keyrings = Vec::new();
+        for path in journal {
+            if std::fs::read_to_string(&path).is_ok_and(|text| text.contains("seed_phrase")) {
+                keyrings.push(path);
+            }
+        }
         assert!(
-            !market.out.join("backstop-custodian.seed").exists(),
-            "a burned custodian's seed outlives its key"
+            keyrings.is_empty(),
+            "a run directory holds key material: {keyrings:?}"
+        );
+        assert!(
+            market
+                .state
+                .join(format!("secret-{}", MarketDeployer::custodian_key()))
+                .is_file(),
+            "the custodian's key is not in the keystore a resume signs from"
         );
     }
 
@@ -14984,13 +15033,121 @@ exit 1
         );
     }
 
+    /// HMAC-SHA256 is the construction every backstop custodian's key comes
+    /// out of, so it is pinned to RFC 4231 case 2 and to a derived key
+    /// computed outside this crate (Python's `hmac`, and a base32/CRC16
+    /// written from the strkey spec): a wrong pad byte, a wrong block size,
+    /// the two hashes in the other order, or a checksum written big-endian
+    /// fails here rather than on a pool's backstop.
+    #[test]
+    fn the_custodian_key_is_derived_by_a_construction_pinned_outside_this_crate() {
+        // RFC 4231 case 2: key and data both "Jefe".
+        assert_eq!(
+            hmac_sha256(b"Jefe", b"what do ya want for nothing?"),
+            hex32("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+                .expect("the RFC vector is hex")
+        );
+        // The strkey the CLI's own keystore holds for a fixture identity.
+        const FIXTURE_DEPLOYER_SECRET: &str =
+            "SBFX5IWELBNITDDWNJT2YR6Y7GLEYROP434SNAQ3QJXTBGNGGDL3CJMT";
+        let (version, seed) = strkey_decode(FIXTURE_DEPLOYER_SECRET)
+            .expect("the fixture deployer secret is an strkey seed");
+        assert_eq!(version, STRKEY_SECRET_SEED);
+        assert_eq!(
+            seed.to_vec(),
+            hex32("4b7ea2c4585a898c766a67ac47d8f9964c45cfe6f926821b826f3099a630d7b1")
+                .expect("the fixture seed is hex")
+                .to_vec()
+        );
+        assert_eq!(
+            strkey_encode(version, &seed),
+            FIXTURE_DEPLOYER_SECRET,
+            "a strkey seed does not reproduce from its own bytes"
+        );
+        // The key one run gets: run id 7 of a configuration whose digest is
+        // all `a`, on testnet. The expected value is HMAC-SHA256 of that seed
+        // under that message, strkey-encoded by the independent encoder.
+        let message = format!(
+            "{MARKET_CUSTODIAN_DERIVATION_LABEL}{:016x}:{}:{}",
+            7u64,
+            "a".repeat(64),
+            "testnet"
+        );
+        assert_eq!(
+            strkey_encode(STRKEY_SECRET_SEED, &hmac_sha256(&seed, message.as_bytes())),
+            "SD3DSPR5C2A77WMAUZEPG5H6A5TUWHS77Y74XBVSEYGWBL2AGRUPLNRK",
+            "a derived custodian key is not what the standard says it is"
+        );
+    }
+
+    /// A dead runner is the case the key has to survive. The journal is all
+    /// that is left: it names the custodian and says nothing about how its key
+    /// was made, so the new process must arrive at the very same key and keep
+    /// the pool's shares on one identity — not invent a second custodian that
+    /// nothing ever deposited into.
+    #[test]
+    fn a_restored_run_arrives_at_the_same_custodian_key() {
+        let market = a_real_market("custodian-restore-key", true, false);
+        let mut d = market.run(false);
+        let made = fixture_actor(87);
+        market.arm_custodian(&mut d, &made);
+        let derived = d
+            .derive_custodian_secret()
+            .expect("a run's identity always derives its custodian key");
+        assert!(
+            market.settled(&market.slot(&MOp::CreateCustodian)),
+            "the key was never settled in the journal a resume reads"
+        );
+        drop(d);
+        // A fresh process for the same run directory: the journal, not the
+        // keystore, is what it starts from.
+        let restored = market.run(false);
+        assert_eq!(
+            restored.progress.custodian.as_ref(),
+            Some(&made),
+            "a restored run lost the custodian its journal recorded"
+        );
+        assert_eq!(
+            restored
+                .derive_custodian_secret()
+                .expect("a run's identity always derives its custodian key"),
+            derived,
+            "a restored run derived a different custodian than the run it resumed"
+        );
+        // The identity the pool's shares sit on must be the one the keystore
+        // can still sign for: the same name, the same secret, the address the
+        // run recorded.
+        let keystore = restored.keystore_st();
+        assert_eq!(
+            keystore
+                .keys_public_key(&MarketDeployer::custodian_key())
+                .expect("the custodian is still registered"),
+            Some(made.clone()),
+            "the keystore answers for an address other than the one the run recorded"
+        );
+        let registered: [u8; 32] = keystore
+            .keys_secret(&MarketDeployer::custodian_key())
+            .expect("the custodian's secret is still registered");
+        let derived_seed: [u8; 32] = strkey_decode(&derived)
+            .expect("the derived key is an strkey seed")
+            .1
+            .try_into()
+            .expect("a seed is 32 bytes");
+        assert_eq!(
+            registered, derived_seed,
+            "the registered key is not the key this run's id derives"
+        );
+    }
+
     /// The custodian is an output of the run, never an input: the plan a PR
     /// reviews is frozen before any key exists. Two runs of one configuration
     /// bind the same graph — the same coordinates, in the same order, with the
     /// same signing salts — although their custodians differ, and neither plan
-    /// names the address that run will invent. The coordinates a reviewer must
-    /// see include the ones that create, fund, move, deposit, sweep and burn the
-    /// holder.
+    /// names the key or the address that run will invent. The coordinates a
+    /// reviewer must see include the ones that create, fund, move, deposit,
+    /// sweep and burn the holder. And the key is a function of the run, not a
+    /// draw: one run id is one custodian in every process, two run ids are
+    /// two custodians.
     #[test]
     fn the_plan_does_not_bind_the_custodian_it_has_not_yet_created() {
         let planned = |index: u8, who: AccountId| {
@@ -15000,6 +15157,9 @@ exit 1
                 who.as_str(),
             );
             let mut d = market.run(false);
+            let derived = d
+                .derive_custodian_secret()
+                .expect("a run's identity always derives its custodian key");
             market
                 .confirm(&mut d, &MOp::CreateCustodian)
                 .expect("the key coordinate needs no chain");
@@ -15013,6 +15173,10 @@ exit 1
             assert!(
                 !text.contains(who.as_str()),
                 "the frozen plan bound the custodian's address"
+            );
+            assert!(
+                !text.contains(&derived),
+                "the frozen plan bound the custodian's key"
             );
             for coordinate in (1..=6u32).map(|slot| (10u32, slot)) {
                 assert!(
@@ -15028,6 +15192,30 @@ exit 1
         assert_eq!(
             first, second,
             "two runs of one configuration bound different graphs"
+        );
+        // The key is derived, so it cannot be re-rolled: the same run id in a
+        // fresh process re-derives the same custodian, and a run id that is
+        // not this one is a custodian that is not this one.
+        let market = a_real_market("custodian-plan-derived", false, false);
+        let mut d = market.run(false);
+        let own = d
+            .derive_custodian_secret()
+            .expect("a run's identity always derives its custodian key");
+        d.nonce = d.nonce.wrapping_add(1);
+        let other = d
+            .derive_custodian_secret()
+            .expect("a run's identity always derives its custodian key");
+        assert_ne!(own, other, "a second run id derived the same custodian");
+        d.nonce = d.nonce.wrapping_sub(1);
+        assert_eq!(
+            own,
+            d.derive_custodian_secret()
+                .expect("a run's identity always derives its custodian key"),
+            "one run id derived two different custodians"
+        );
+        assert!(
+            own.starts_with('S') && own.len() == 56,
+            "a derived custodian key is not an strkey seed"
         );
     }
 

@@ -3,9 +3,9 @@
 //! `contracts/tools/soroban-vault-cli/src/stellar.rs` (executor trait, parsers).
 
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -1014,6 +1014,15 @@ impl Invocation {
 pub trait Executor {
     fn run(&self, args: &[String]) -> anyhow::Result<CmdOutput>;
 
+    /// One command whose child reads `input` from its stdin — the form
+    /// `stellar keys add <name> --secret-key` takes a secret in, so a key the
+    /// run derives never has to appear in an argv anyone can read. Only a
+    /// real child has a stdin; everything else refuses, which is the same
+    /// fail-closed law as an unsupported network.
+    fn run_stdin(&self, _args: &[String], _input: &[u8]) -> anyhow::Result<CmdOutput> {
+        Err(anyhow!("{}", Safe::literal("this executor takes no stdin")))
+    }
+
     /// `run`, refused once `start_by` (real time) has passed. Executors that
     /// set up before launching override this to recheck at the launch itself.
     fn run_by(
@@ -1057,6 +1066,55 @@ pub struct RealExecutor {
 impl Executor for RealExecutor {
     fn run(&self, args: &[String]) -> anyhow::Result<CmdOutput> {
         self.launch(args, None)
+    }
+
+    /// `keys add` is a local keystore write, not a network mutation, so this
+    /// is the pair capture with a pipe on stdin: the child gets the secret,
+    /// the parent never puts it in argv, and the captured stdout stays out of
+    /// every error the caller can render.
+    fn run_stdin(&self, args: &[String], input: &[u8]) -> anyhow::Result<CmdOutput> {
+        std::fs::create_dir_all(self.xdg.join("stellar"))?;
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(args)
+            .env_remove("STELLAR_CONTRACT_ID")
+            .env("XDG_CONFIG_HOME", &self.xdg)
+            .env(
+                "HOME",
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+            )
+            .current_dir(&self.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in ["STELLAR_RPC_URL", "STELLAR_RPC_HEADERS"] {
+            cmd.env_remove(name);
+        }
+        for (name, value) in &self.rpc_env {
+            cmd.env(name, value);
+        }
+        let mut child = cmd
+            .spawn()
+            .with_context(|| Safe::pair_run(&self.bin, args))?;
+        // The secret is 56 bytes; writing it before waiting cannot deadlock,
+        // and the pipe is closed by the drop so the child sees EOF.
+        if let Some(mut pipe) = child.stdin.take() {
+            pipe.write_all(input)
+                .with_context(|| Safe::pair_run(&self.bin, args))?;
+            pipe.flush()
+                .with_context(|| Safe::pair_run(&self.bin, args))?;
+        }
+        let output = child
+            .wait_with_output()
+            .with_context(|| Safe::pair_run(&self.bin, args))?;
+        Ok(CmdOutput::new(
+            RawText(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            )),
+            RawText(Some(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            )),
+            output.status.success(),
+        ))
     }
 
     fn run_by(
@@ -1307,7 +1365,6 @@ impl<'a, E: Executor> Stellar<'a, E> {
     pub fn market_network(&self) -> &'a str {
         self.market_network.unwrap_or(self.net.passphrase.as_str())
     }
-
 
     /// The market-policy signing law for every chain mutation (SEC003):
     /// a frozen pin must be configured; the caller's requested source may
@@ -2065,6 +2122,77 @@ impl<'a, E: Executor> Stellar<'a, E> {
                     Safe::literal("admin lookup returned no valid identity")
                 )
             })
+    }
+
+    /// The raw ed25519 seed behind one identity:
+    /// `keys secret <alias> --config-dir <dir>`, decoded through the strkey
+    /// check. The secret itself is never rendered — not in a log, not in an
+    /// error — because this is the key from which the backstop custodian's
+    /// whole identity is derived, and a run that names it in a comment has
+    /// handed everyone who reads the comment its signing power.
+    pub(crate) fn keys_secret(&self, alias: &str) -> anyhow::Result<[u8; 32]> {
+        let config_dir = self.net.config_dir.display().to_string();
+        let out = self.run(s(&["keys", "secret", alias, "--config-dir", &config_dir]))?;
+        anyhow::ensure!(
+            out.ok(),
+            "{}",
+            Safe::literal("the deployer identity's secret could not be read")
+        );
+        let text = out
+            .stdout
+            .pick()
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with('S'))
+            .ok_or_else(|| anyhow!("{}", Safe::literal("no deployer secret was read")))?;
+        let (version, seed) = crate::deploy::strkey_decode(text)
+            .filter(|(version, payload)| {
+                *version == crate::deploy::STRKEY_SECRET_SEED && payload.len() == 32
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "{}",
+                    Safe::literal("the deployer secret is not an strkey seed")
+                )
+            })?;
+        debug_assert_eq!(version, crate::deploy::STRKEY_SECRET_SEED);
+        let mut raw = [0u8; 32];
+        raw.copy_from_slice(&seed);
+        Ok(raw)
+    }
+
+    /// Registers a derived identity in the config dir this `Stellar` reads:
+    /// `stellar keys add <alias> --secret-key`, with the secret on stdin. The
+    /// keystore — the CLI's own keystore, in the CLI's own format — is the
+    /// only place a custodian's private key is ever written, and the run
+    /// directory holds none of it.
+    pub(crate) fn keys_add_secret(&self, alias: &str, secret: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            crate::deploy::strkey_decode(secret)
+                .filter(|(version, payload)| {
+                    *version == crate::deploy::STRKEY_SECRET_SEED && payload.len() == 32
+                })
+                .is_some(),
+            "{}",
+            Safe::literal("a derived custodian key is not an strkey seed")
+        );
+        let config_dir = self.net.config_dir.display().to_string();
+        let args = s(&[
+            "keys",
+            "add",
+            alias,
+            "--secret-key",
+            "--overwrite",
+            "--config-dir",
+            &config_dir,
+        ]);
+        let out = self.exec.run_stdin(&args, secret.as_bytes())?;
+        anyhow::ensure!(
+            out.ok(),
+            "{}",
+            Safe::literal("the derived custodian key could not be registered")
+        );
+        Ok(())
     }
 
     /// The shared shape of every market mutation whose source is the pinned

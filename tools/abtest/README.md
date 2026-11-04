@@ -667,15 +667,19 @@ unfinished.
 ### Backstop custody
 
 A run does not keep the market's backstop shares on the key that deployed it. It
-makes a fresh custodian keypair for the run, funds it 1.2 XLM, moves the pool's
-Comet LP to it with `comet.transfer`, and calls `backstop.deposit` from it. The
-custodian's leftover XLM is then swept back to the deploying key and the account
+derives a custodian keypair for the run — HMAC-SHA256 over the run's own
+identity, keyed by the deploying key's secret and registered in the operator's
+keystore, so a runner that died partway arrives at the same account instead of
+funding a second one, and the run directory keeps no key material — funds it
+5 XLM, moves the pool's Comet LP to it with `comet.transfer`, and calls
+`backstop.deposit` from it. The
+custodian's leftover XLM is then swept back to the deploying key, keeping only
+the 1.002 XLM the burn itself costs, and the account
 is burned — `set_options` with master weight 0 and thresholds 1/1/1 — and the
 burn is read back before the run calls itself finished. Backstop shares are not
 transferable, so with no key left able to sign for that account nobody can ever
 queue or move the shares it holds, and the CI deployer key never held them. The
-custodian seed lives in the run directory as a 0600 file, so a runner that died
-partway can resume the same account instead of funding a second one. The manifest
+manifest
 records the account as `backstop_custodian` and the transaction that burned it as
 `backstop_custodian_burn_tx`.
 
