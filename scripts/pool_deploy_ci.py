@@ -212,6 +212,15 @@ def plan_comment(entry, head_sha, check_rc, check_out, code, events, plan) -> st
             "until this pool's feeds are live (keeper or RedStone push to the sources), then resumes with "
             "the `pool-deploy` workflow's *resume* dispatch.",
         ]
+    if any(s["action"] == "burn the custodian" for s in plan["steps"]):
+        lines += [
+            "",
+            "**Backstop custody.** The pool's backstop shares belong to a custodian account this run "
+            "creates and funds, and that is left burned at the end (master weight 0, thresholds 1/1/1). "
+            "The CI deployer key never holds them, and backstop shares are not transferable, so it can "
+            "never queue or move them. The custodian's XLM is swept back to the deployer before the "
+            "burn. The curator's hand-off is unchanged.",
+        ]
     return "\n".join(lines)
 
 
@@ -273,6 +282,16 @@ def deploy_comment(entry, code, events) -> str:
     if done:
         lines += ["Deployed.", "", "| role | contract |", "|---|---|"]
         lines += [f"| {k} | `{done[k]}` |" for k in ("pool", "backstop", "factory", "comet", "emitter") if k in done]
+        custodian = done.get("backstop_custodian")
+        if custodian:
+            burn = done.get("backstop_custodian_burn_tx")
+            lines += [
+                "",
+                f"**The backstop shares are held by `{custodian}`,** which this run burned at the end "
+                "(master weight 0, thresholds 1/1/1): no key can sign for it, so they can never be "
+                "queued or moved, and the deployer key never held them."
+                + (f" Burn tx: `{burn}`." if burn else ""),
+            ]
         handoff = done.get("handoff")
         if handoff:
             lines += ["", "**The curator signs these from their own wallet to take over:**", ""]

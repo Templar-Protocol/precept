@@ -86,6 +86,39 @@ class Staging(unittest.TestCase):
             ci.run_id("x", "testnet", "abc")
 
 
+def step(phase, slot, action, target_role=None):
+    return {"phase": phase, "slot": slot, "action": action, "target_role": target_role}
+
+
+CUSTODY = [
+    step(10, 1, "create a backstop custodian"),
+    step(10, 2, "fund the backstop custodian"),
+    step(10, 3, "move the backing to the custodian"),
+    step(10, 4, "deposit the backing from the custodian", "backstop"),
+    step(10, 5, "sweep the custodian to the deployer"),
+    step(10, 6, "burn the custodian"),
+]
+
+
+class PlanComment(unittest.TestCase):
+    def body(self, steps):
+        plan = {"plan_sha256": D1, "steps": steps}
+        entry = {"run": RUN, "name": "gami-usdc", "network": "testnet"}
+        return ci.plan_comment(entry, SHA, 0, "ok", ci.PLAN_EXIT, [plan], plan)
+
+    def test_a_run_that_burns_a_custodian_says_who_holds_the_shares(self):
+        body = self.body([step(10, 0, "freeze pool"), *CUSTODY, step(11, 1, "accept admin")])
+        self.assertIn("custodian", body)
+        self.assertIn("burned", body.lower())
+        self.assertIn("CI deployer key never holds them", body)
+        self.assertIn("swept back to the deployer", body)
+        self.assertIn("curator's hand-off is unchanged", body)
+
+    def test_a_plan_without_a_custodian_row_says_nothing_about_one(self):
+        body = self.body([step(10, 1, "deposit backstop backing", "backstop")])
+        self.assertNotIn("custodian", body)
+
+
 class DeployComment(unittest.TestCase):
     def test_done_lists_what_the_curator_signs(self):
         done = {"event": "done", "pool": "CPOOL", "handoff": {"accept": [
@@ -95,6 +128,21 @@ class DeployComment(unittest.TestCase):
         body = ci.deploy_comment({"run": RUN, "name": "gami-usdc", "network": "testnet"}, 0, [done])
         self.assertIn("`GCUR` calls `accept_admin()` on `CPOOL`", body)
         self.assertIn("`GORA` calls `accept_ownership()` on `CLAZ` (before ledger 99)", body)
+
+    def test_done_names_the_burned_custodian_holding_the_shares(self):
+        done = {"event": "done", "pool": "CPOOL", "backstop": "CBAK",
+                "backstop_custodian": "GCUST", "backstop_custodian_burn_tx": "3" * 64}
+        body = ci.deploy_comment({"run": RUN, "name": "gami-usdc", "network": "testnet"}, 0, [done])
+        self.assertIn("`GCUST`", body)
+        self.assertIn("burned", body)
+        self.assertIn("master weight 0, thresholds 1/1/1", body)
+        self.assertIn("deployer key never held them", body)
+        self.assertIn(f"`{'3' * 64}`", body)
+
+    def test_a_done_without_a_custodian_prints_no_custodian_line(self):
+        body = ci.deploy_comment({"run": RUN, "name": "gami-usdc", "network": "testnet"},
+                                0, [{"event": "done", "pool": "CPOOL"}])
+        self.assertNotIn("custodian", body)
 
     def test_a_stop_says_how_to_resume(self):
         stop = {"event": "failed", "reason": "no Accepted price", "violations": ["v"]}

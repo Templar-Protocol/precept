@@ -1220,6 +1220,19 @@ fn robot_event(
                 "factory": manifest.factory.to_string(),
                 "deploy_ledger": manifest.deploy_ledger,
             });
+            // Who holds the pool's backstop shares, named in the same event a
+            // CI job reads the rest of the run's identifiers from: the
+            // custodian does, it was burned, and the deployer key never held
+            // them. A lab run has no real manifest and no custodian, so it
+            // carries neither key.
+            if let Some(real) = manifest.real.as_ref() {
+                if let Some(custodian) = real.backstop_custodian.as_ref() {
+                    done["backstop_custodian"] = serde_json::json!(custodian.to_string());
+                }
+                if let Some(burned) = real.backstop_custodian_burn_tx.as_ref() {
+                    done["backstop_custodian_burn_tx"] = serde_json::json!(burned.to_string());
+                }
+            }
             // A run that handed the market over names, in the same event that
             // reports its completion, the signatures the network is still
             // waiting for — so a CI job that sees `done` can tell its curator

@@ -1333,6 +1333,10 @@ struct Progress {
     /// that created them. Their secrets are deleted after the lock, so the
     /// journal — not the keystore — is where a resumed run finds them.
     issuers: Vec<AccountId>,
+    /// The backstop custodian's address, recovered from the coordinate that
+    /// created it. Like a leg's issuer, its secret is deleted once the burn is
+    /// proven, and the journal is what a resume reads for the address.
+    custodian: Option<AccountId>,
 }
 
 /// Outcome of one resume-law reconciliation pass. `Settled` is returned only
@@ -1581,8 +1585,30 @@ pub(crate) enum MOp {
     RealSetReserve {
         asset: usize,
     },
-    /// Deposit the LP into the backstop and read the threshold back.
+    /// Create this run's backstop custodian key: a fresh ed25519 keypair in
+    /// this run's own keystore, whose seed is copied beside the journal at
+    /// 0600 so a run whose runner died can re-import it. Submits nothing to
+    /// the chain, so an open intent here is archived and run again.
+    CreateCustodian,
+    /// `create-account`: the deployer funds the custodian with its base
+    /// reserve and the fees of the three transactions the custodian signs
+    /// itself — the deposit, the sweep, and its own burn.
+    FundCustodian,
+    /// `comet.transfer(admin, custodian, lp)`: the pool's backing leaves the
+    /// deployer's hands before anyone places it.
+    MoveBacking,
+    /// Deposit the LP into the backstop **from the custodian**, which is the
+    /// only account whose signature its `from.require_auth()` accepts, and
+    /// read the threshold back.
     RealBackstopDeposit,
+    /// `tx new payment` of everything above its own reserve, from the
+    /// custodian back to the deployer.
+    SweepCustodian,
+    /// The custodian's permanent burn: master weight zero, thresholds 1,1,1,
+    /// no signers, with the same ledger readback the shim issuer's lock uses.
+    /// Its shares cannot be transferred, so an account that can never sign
+    /// for them is the only holder that guarantees nobody else ever can.
+    BurnCustodian,
     /// Freeze the Comet's transfers once the backing is in place.
     RealFreezeComet,
     /// The activation itself: `set_status(0)`, where the pool re-checks the
@@ -1673,6 +1699,22 @@ pub(crate) const COMET_CLAIM_ATTEMPTS: u32 = 3;
 /// proposal (pool/src/storage.rs `set_proposed_admin`), so a curator signs one
 /// deadline for a whole launch rather than one per contract.
 pub(crate) const HANDOFF_TTL_LEDGERS: u32 = 172_800;
+
+/// The XLM the deployer puts on a fresh backstop custodian, in stroops: one
+/// base reserve (a custodian holds no trustline — the pool's backing is a
+/// Soroban token, not a classic asset) plus the fee of each of the three
+/// transactions the custodian signs itself, with room to spare. Every stroop
+/// above the reserve is swept back to the deployer before the burn, so this
+/// is a temporary hold, not a cost.
+pub(crate) const MARKET_CUSTODIAN_FUND_STROOPS: i64 = 12_000_000;
+
+/// What the sweep leaves on the custodian, in stroops: its base reserve plus
+/// the fee of the burn it signs next and the fee of the sweep itself, so the
+/// burn cannot fail for want of a fee and a resumed run never re-sends a
+/// sweep that already landed. A run's whole cost for a custodian is therefore
+/// its transactions' fees; `the_sweep_leaves_the_custodian_exactly_its_reserve`
+/// ties this number to the fee the CLI is told to bid.
+pub(crate) const MARKET_CUSTODIAN_KEEP_STROOPS: i64 = 10_020_000;
 
 /// The `(nonce, role, side)` triples one graph consumes for one nonce. The
 /// graph is passed in because a run's graph is the one it froze, not the
@@ -2177,6 +2219,14 @@ impl RealShape {
 ///   before it;
 /// - reserves before the deposit: the backstop's fourth-power test reads the
 ///   pool's reserve list;
+/// - the custodian's whole life inside phase 10, in one order and no other:
+///   its key first (its address is what everything after it names), then the
+///   funding that makes the account exist, then the LP, then the deposit —
+///   the backstop accepts a deposit only from an account that signed for it,
+///   so the backing has to be the custodian's before it can place it — then
+///   the sweep and the burn. Nothing between the deposit and the burn can
+///   move value, so a run interrupted anywhere in that pair resumes with
+///   exactly the transaction it owes;
 /// - the deposit and its threshold readback before the freeze, and the
 ///   freeze before activation: `set_status(0)` is where the pool re-checks
 ///   the backstop, and a Comet whose transfers are frozen cannot be
@@ -2406,19 +2456,68 @@ pub(crate) fn real_market_schedule(cfg: &MarketConfig, shape: &RealShape) -> Vec
             MOp::RealSetReserve { asset },
         );
     }
-    // Phase 10: the backing, the trustline removals it unblocks, the freeze,
-    // and the activation.
+    // Phase 10: the backing's custody, the backing, the trustline removals it
+    // unblocks, the freeze, and the activation.
+    //
+    // The custodian is this run's own single-purpose holder: a key that is
+    // generated, funded, handed the LP, used to place the backing, emptied,
+    // and burned, all inside these ten slots. The deployer key never calls
+    // `backstop.deposit` — the backstop's `from.require_auth()` means only
+    // the custodian can — and after the burn nobody at all can sign for the
+    // shares, which is the point: backstop shares cannot be transferred, so
+    // an account that can never sign is the only holder that provably cannot
+    // queue them. Its address is an output of the run, never an input: the
+    // plan a PR reviews cannot know it, and the frozen plan binds nothing
+    // that this phase will invent.
     add(
         10,
         1,
-        "deposit backstop backing",
+        "create a backstop custodian",
+        MarketMutationKind::FundKey,
+        MOp::CreateCustodian,
+    );
+    add(
+        10,
+        2,
+        "fund the backstop custodian",
+        MarketMutationKind::Invoke,
+        MOp::FundCustodian,
+    );
+    add(
+        10,
+        3,
+        "move the backing to the custodian",
+        MarketMutationKind::Invoke,
+        MOp::MoveBacking,
+    );
+    add(
+        10,
+        4,
+        "deposit the backing from the custodian",
         MarketMutationKind::Invoke,
         MOp::RealBackstopDeposit,
+    );
+    // The custodian has no further use once the backing is placed, and every
+    // step after this one is the pool's, not its. Sweep first, then burn: a
+    // run that died between the two resumes with exactly the burn.
+    add(
+        10,
+        5,
+        "sweep the custodian to the deployer",
+        MarketMutationKind::Invoke,
+        MOp::SweepCustodian,
+    );
+    add(
+        10,
+        6,
+        "burn the custodian",
+        MarketMutationKind::Config,
+        MOp::BurnCustodian,
     );
     for leg in 0..2usize {
         add(
             10,
-            2 + leg as u32,
+            7 + leg as u32,
             "remove shim trustline",
             MarketMutationKind::Config,
             MOp::DropTrust { leg },
@@ -2426,7 +2525,7 @@ pub(crate) fn real_market_schedule(cfg: &MarketConfig, shape: &RealShape) -> Vec
     }
     add(
         10,
-        4,
+        9,
         "freeze comet transfers",
         MarketMutationKind::Config,
         MOp::RealFreezeComet,
@@ -2434,7 +2533,7 @@ pub(crate) fn real_market_schedule(cfg: &MarketConfig, shape: &RealShape) -> Vec
     if shape.activate {
         add(
             10,
-            5,
+            10,
             "activate pool",
             MarketMutationKind::Config,
             MOp::RealSetStatus { to: 0 },
@@ -2611,6 +2710,19 @@ pub(crate) fn write_deployment_plan(out: &Path, plan: &DeploymentPlan) -> anyhow
         "the frozen deployment plan is unreadable after publication"
     );
     Ok(())
+}
+
+/// Whether an account can never sign again: master weight zero, every
+/// threshold at one so no weight can ever reach one, and no other signer that
+/// could be raised to meet one. A leg's issuer lock and the backstop
+/// custodian's burn are the same predicate, asked of the network's own entry
+/// rather than of any index, so neither can be proven by a lagging read.
+fn account_is_burned(account: &crate::stellar::LedgerAccount) -> bool {
+    account.master_weight == 0
+        && account.low == 1
+        && account.med == 1
+        && account.high == 1
+        && account.signers.is_empty()
 }
 
 /// Synchronize a directory so a rename or newly created entry is durable.
@@ -3358,10 +3470,14 @@ impl MarketDeployer {
                 .find(|s| s.phase == phase && s.slot == slot);
             // A read-only check submits nothing, so its open intent applied
             // nothing: it is archived and run again, which re-reads the chain
-            // and records the facts the coordinates after it bind to.
+            // and records the facts the coordinates after it bind to. The
+            // custodian's key coordinate belongs with them: generating a key
+            // and copying its seed are local acts that submit nothing to a
+            // chain, and re-running one is idempotent — `keys generate`
+            // reports a key that exists instead of replacing it.
             if matches!(
                 coordinate.as_ref().map(|s| &s.op),
-                Some(MOp::RealVerifyRuntime | MOp::RealVerifyAdapter)
+                Some(MOp::RealVerifyRuntime | MOp::RealVerifyAdapter | MOp::CreateCustodian)
             ) {
                 crate::market_history::archive_never_applied(
                     &self.journal.out(),
@@ -3789,6 +3905,22 @@ impl MarketDeployer {
                 }
                 continue;
             }
+            if let MOp::CreateCustodian = &slot.op {
+                // The custodian's address, from the coordinate that created it
+                // — the same law as a leg's issuer, for the same reason: its
+                // secret is deleted once the burn is proven, so the keystore is
+                // deliberately not where a resume looks. An address nobody can
+                // sign for is the intended end state; an invented one would
+                // strand the pool's backing with the wrong owner.
+                if let Some(facts) = self.settled_facts(slot.phase, slot.slot)? {
+                    if let Some(address) = facts.get("custodian").and_then(Value::as_str) {
+                        if let Ok(custodian) = AccountId::from_str(address) {
+                            self.progress.custodian = Some(custodian);
+                        }
+                    }
+                }
+                continue;
+            }
             if let MOp::RealVerifyRuntime = &slot.op {
                 // A shared runtime and its governance are not deployments this
                 // run made, so no prediction of ours carries them: the
@@ -4180,6 +4312,49 @@ impl MarketDeployer {
             .ok_or_else(|| anyhow!("the backstop reports no deposit for this pool"))?;
         let q4w_pct = figure("q4w_pct")
             .ok_or_else(|| anyhow!("the backstop reports no queued-withdrawal figure"))?;
+        // The custody this run exists to leave, read from the chain rather
+        // than from anything this run recorded: the pool's backstop shares are
+        // held by an account that can never sign for them again, the deployer
+        // holds none of them, and the custodian holds exactly what the backing
+        // deposited. A manifest is a record of who is accountable for a pool;
+        // publishing one that recorded an unburned custodian, or a deployer
+        // that could still queue its own backing, would be exactly the record
+        // this change exists to make impossible.
+        let custodian = self.custodian()?;
+        let deployer_shares = self.backstop_shares(admin)?;
+        let custodian_shares = self.backstop_shares(&custodian)?;
+        anyhow::ensure!(
+            deployer_shares == 0,
+            "the deployer still holds {} backstop shares of this pool; only the custodian may hold them",
+            deployer_shares
+        );
+        anyhow::ensure!(
+            custodian_shares == i128::from(backstop_deposit),
+            "the custodian holds {} backstop shares, not the {} the pool's backing deposited",
+            custodian_shares,
+            backstop_deposit
+        );
+        anyhow::ensure!(
+            self.reader()
+                .ledger_account(custodian.as_str())?
+                .is_some_and(|account| account_is_burned(&account)),
+            "the backstop custodian can still sign; the run does not publish until its burn is on the ledger"
+        );
+        // The burn's own transaction, from the facts that coordinate settled.
+        // A burn settled by reconciliation recorded no command output, and the
+        // ledger entry above is the proof either way, so this is evidence and
+        // never a requirement.
+        let burn_tx = self
+            .schedule()
+            .iter()
+            .find(|slot| slot.op == MOp::BurnCustodian)
+            .and_then(|slot| self.settled_facts(slot.phase, slot.slot).ok().flatten())
+            .and_then(|facts| {
+                facts
+                    .get("burn_tx")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
         Ok(MarketManifest {
             real: Some(crate::manifest::RealMarketManifest {
                 pool_name: Safe::render_parsed(Policy::Market, &json!({"pool": pool.name}), 256),
@@ -4195,6 +4370,8 @@ impl MarketDeployer {
                     .as_ref()
                     .and_then(|shape| shape.handoff.as_ref())
                     .map(|handoff| handoff.pool_admin.clone()),
+                backstop_custodian: Some(custodian),
+                backstop_custodian_burn_tx: burn_tx.and_then(|hash| hash.parse().ok()),
             }),
             network: MarketNetworkRecord {
                 label: Safe::literal(network.label()),
@@ -4583,11 +4760,12 @@ impl MarketDeployer {
                 }
             });
         }
-        // A classic coordinate of the activation shim has neither a contract
-        // to act on nor an address to predict: its authority is the account
-        // and asset named in the configuration, and the record of the
-        // coordinate that created them. It is the one family of operations
-        // that is lawful unbaked, and only within the real graph.
+        // A classic coordinate of the activation shim, or one of the backstop
+        // custodian's own account operations, has neither a contract to act on
+        // nor an address to predict: its authority is an account this run
+        // created and the record of the coordinate that created it. It is the
+        // one family of operations that is lawful unbaked, and only within the
+        // real graph.
         let classic = matches!(
             slot.op,
             MOp::CreateIssuer { .. }
@@ -4595,6 +4773,10 @@ impl MarketDeployer {
                 | MOp::MintLeg { .. }
                 | MOp::LockIssuer { .. }
                 | MOp::DropTrust { .. }
+                | MOp::CreateCustodian
+                | MOp::FundCustodian
+                | MOp::SweepCustodian
+                | MOp::BurnCustodian
         );
         anyhow::ensure!(
             record.target.is_some()
@@ -4681,6 +4863,16 @@ impl MarketDeployer {
             // signer refusal here means the keystore was rewritten underneath
             // the run, which is exactly what the law is for.
             MOp::MintLeg { leg } | MOp::LockIssuer { leg } => self.issuer_of(*leg),
+            // The custodian signs the only three transactions it will ever
+            // sign. The deposit is not the deployer's to sign: the backstop's
+            // `deposit` calls `from.require_auth()`, so the account whose LP
+            // it is must authorize it, and a sweep or a `set-options` can only
+            // come from the account itself. The address is the one this run
+            // created and the journal recorded, and its key lives only in this
+            // run's keystore.
+            MOp::RealBackstopDeposit | MOp::SweepCustodian | MOp::BurnCustodian => {
+                self.custodian()
+            }
             _ => {
                 self.progress.admin.clone().ok_or_else(|| {
                     anyhow!("the operator is unresolved, so no mutation is authorized")
@@ -4762,6 +4954,243 @@ impl MarketDeployer {
     fn leg_seed(&self, leg: usize) -> i64 {
         let (blnd, usdc) = crate::manifest::market_shim_seed();
         i64::try_from(if leg == 0 { blnd } else { usdc }).unwrap_or(i64::MAX)
+    }
+
+    // ---- the backstop custodian ----------------------------------------------------
+    //
+    // A pool's backstop shares cannot be transferred, so whoever holds them can
+    // queue them and put the pool on ice. The run therefore hands them to an
+    // account that exists for no other purpose and then takes away its ability
+    // to sign: the custody is the burn, and the proof is the ledger entry.
+
+    /// The custodian's address, as the coordinate that created it recorded it.
+    /// A resumed run finds it in the journal, never in the keystore, whose
+    /// copy of the secret the burn deletes.
+    fn custodian(&self) -> anyhow::Result<AccountId> {
+        self.progress
+            .custodian
+            .clone()
+            .ok_or_else(|| anyhow!("the backstop custodian is unresolved"))
+    }
+
+    /// The keystore name of this run's custodian key. Per-run like a leg's
+    /// issuer's, so two markets never share a holder, and a name carries no
+    /// secret.
+    fn custodian_key() -> String {
+        "market-backstop-custodian".to_string()
+    }
+
+    /// Where the custodian's seed is kept for the length of the run: beside
+    /// the journal, inside the run directory, which is exactly what the
+    /// journal's mirror copies to durable storage. The keystore entry is a
+    /// signing cache; this file is the custody, and it is the one a run whose
+    /// runner died re-imports from.
+    fn custodian_seed_file(&self) -> PathBuf {
+        self.journal.out().join("backstop-custodian.seed")
+    }
+
+    /// The keystore's own copy of the custodian key.
+    fn custodian_key_file(&self) -> PathBuf {
+        self.actor_net
+            .config_dir
+            .join("identity")
+            .join(format!("{}.toml", Self::custodian_key()))
+    }
+
+    /// Seal a file holding a secret so it is never world-readable — including
+    /// after a restore from the journal's mirror, which is free to hand back
+    /// whatever mode the stored object carried.
+    fn seal_secret(path: &Path) -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| anyhow!("sealing {}: {e}", path.display()))
+    }
+
+    /// Copy the generated custodian seed beside the journal at 0600, creating
+    /// it once. An existing copy is compared against the keystore's bytes
+    /// rather than rewritten: a run directory carrying someone else's
+    /// custodian key is a refusal, not a second chance.
+    fn persist_custodian_seed(&self) -> anyhow::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let seed = std::fs::read(self.custodian_key_file())
+            .map_err(|_| anyhow!("the custodian's key is not in this run's keystore"))?;
+        let file = self.custodian_seed_file();
+        match std::fs::read(&file) {
+            // Replaying this coordinate re-presents the same key, so the
+            // bytes must agree; anything else is a different custodian.
+            Ok(existing) => anyhow::ensure!(
+                existing == seed,
+                "the custodian seed in this run directory is not the key this run generated"
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let tmp = self.journal.out().join(format!(
+                    "backstop-custodian.seed.{}.tmp",
+                    std::process::id()
+                ));
+                let written = || -> anyhow::Result<()> {
+                    let mut handle = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&tmp)
+                        .map_err(|e| anyhow!("creating the custodian seed staging file: {e}"))?;
+                    handle
+                        .write_all(&seed)
+                        .map_err(|e| anyhow!("writing the custodian seed: {e}"))?;
+                    handle
+                        .sync_all()
+                        .map_err(|e| anyhow!("syncing the custodian seed: {e}"))?;
+                    Ok(())
+                }();
+                if let Err(e) = written {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                std::fs::rename(&tmp, &file).map_err(|e| anyhow!("publishing the custodian seed: {e}"))?;
+                Self::seal_secret(&file)?;
+                sync_dir(&self.journal.out());
+                anyhow::ensure!(
+                    std::fs::read(&file).is_ok_and(|bytes| bytes == seed),
+                    "the custodian seed is unreadable after publication"
+                );
+            }
+            Err(e) => return Err(anyhow!("reading the custodian seed: {e}")),
+        }
+        // The keystore copy is the one the CLI signs with; seal it too, since
+        // a restored run may have written it with any mode.
+        Self::seal_secret(&self.custodian_key_file())
+    }
+
+    /// Make this run's keystore hold its custodian key again. The ordinary
+    /// case is that it never lost it; the recovery case is a run directory
+    /// restored from the journal's mirror, where the seed came back and the
+    /// keystore did not. The restored key must resolve to the address the
+    /// journal recorded, so a substituted key is refused here rather than at
+    /// the first send that needed it.
+    fn restore_custodian_key(&self) -> anyhow::Result<()> {
+        let name = Self::custodian_key();
+        let reader = self.reader();
+        if reader.keys_public_key(&name)?.is_some() {
+            return Self::seal_secret(&self.custodian_key_file());
+        }
+        let want = self.custodian()?;
+        let seed = std::fs::read(self.custodian_seed_file())
+            .map_err(|_| anyhow!("neither this run's keystore nor its run directory holds the custodian's key; the backing it holds can never be moved by anyone, which is the intended end state but not this run's"))?;
+        let key = self.custodian_key_file();
+        std::fs::create_dir_all(key.parent().unwrap_or(&self.actor_net.config_dir))
+            .map_err(|e| anyhow!("creating the keystore for the restored custodian key: {e}"))?;
+        std::fs::write(&key, &seed).map_err(|e| anyhow!("restoring the custodian key: {e}"))?;
+        Self::seal_secret(&key)?;
+        let restored = reader
+            .keys_public_key(&name)?
+            .ok_or_else(|| anyhow!("the restored custodian key does not resolve to an identity"))?;
+        anyhow::ensure!(
+            restored == want,
+            "the custodian key restored from this run's seed is not the account the journal recorded"
+        );
+        Ok(())
+    }
+
+    /// The CLI seam bound to the backstop custodian — the only signer the
+    /// backstop's `deposit` accepts for its own LP, and the only account that
+    /// can pay from itself or change its own options. The key lives in this
+    /// run's own keystore and its address is the one this run created, so a
+    /// pinned-signer refusal here means the keystore was rewritten underneath
+    /// the run.
+    fn custodian_st(
+        &self,
+        record: &MarketCustodyRecord,
+    ) -> anyhow::Result<Stellar<'_, RealExecutor>> {
+        let custodian = self.custodian()?;
+        anyhow::ensure!(
+            custodian == record.signer,
+            "the frozen signer is not the run's backstop custodian"
+        );
+        self.restore_custodian_key()?;
+        let alias = Self::custodian_key();
+        Ok(Stellar::new(&self.actor_net, &self.exec, Policy::Market)
+            .with_market_signer(&alias, &custodian))
+    }
+
+    /// The pool's backing LP one account holds. Every question this run asks
+    /// about who holds the backing is asked of this one read.
+    fn comet_balance(&self, holder: &AccountId) -> anyhow::Result<i128> {
+        let comet = self.deployed_id("comet")?;
+        let held = self.operator_reader().view(
+            comet.as_str(),
+            self.ctx.admin_alias(),
+            "balance",
+            &[kv("id", holder.as_str())],
+        )?;
+        price_as_i128(&held)
+            .ok_or_else(|| anyhow!("the backing pool reports no balance for {}", holder.as_str()))
+    }
+
+    /// The LP this pool's backing has ever minted. The custodian must hold all
+    /// of it, and no account but this run's can hold any of it, so this is the
+    /// number a moved backing is measured against.
+    fn comet_total_supply(&self) -> anyhow::Result<i128> {
+        let comet = self.deployed_id("comet")?;
+        let total = self.operator_reader().view(
+            comet.as_str(),
+            self.ctx.admin_alias(),
+            "get_total_supply",
+            &[],
+        )?;
+        price_as_i128(&total).ok_or_else(|| anyhow!("the backing pool reports no total supply"))
+    }
+
+    /// The backstop shares one account holds in this pool. Shares cannot be
+    /// transferred, so who holds them is the whole custody question.
+    fn backstop_shares(&self, holder: &AccountId) -> anyhow::Result<i128> {
+        let (backstop, pool) = (self.deployed_id("backstop")?, self.deployed_id("pool")?);
+        let balance = self.operator_reader().view(
+            backstop.as_str(),
+            self.ctx.admin_alias(),
+            "user_balance",
+            &[kv("pool", pool.as_str()), kv("user", holder.as_str())],
+        )?;
+        balance
+            .get("shares")
+            .and_then(price_as_i128)
+            .ok_or_else(|| anyhow!("the backstop reports no share balance for {}", holder.as_str()))
+    }
+
+    /// The permanent lock one of this run's own accounts is left in: master
+    /// weight zero, every threshold at one, and no other signer, read back
+    /// from the account's own ledger entry so a lagging index cannot show a
+    /// lock that was never applied. Nothing is submitted when the account is
+    /// already inert, so a resumed run re-sends neither a leg's lock nor the
+    /// custodian's burn. The caller's seam signs the `set-options`, which is
+    /// why it is a parameter and not assumed: only the account itself may
+    /// change its own options. The CLI's own announcement of that transaction
+    /// comes back as evidence for the manifest — never as a fact this depends
+    /// on, because a reconciliation has no CLI output to read.
+    fn ensure_account_burned(
+        &self,
+        who: &str,
+        address: &AccountId,
+        st: &Stellar<'_, RealExecutor>,
+    ) -> anyhow::Result<Option<crate::stellar::TxHash>> {
+        let before = self
+            .reader()
+            .ledger_account(address.as_str())?
+            .ok_or_else(|| anyhow!("the {who} account is not on the network"))?;
+        let sent = if account_is_burned(&before) {
+            None
+        } else {
+            st.tx_lock_account()?
+        };
+        let after = self
+            .reader()
+            .ledger_account(address.as_str())?
+            .ok_or_else(|| anyhow!("the {who} account is not on the network"))?;
+        anyhow::ensure!(
+            account_is_burned(&after),
+            "the {who} is not locked: master weight zero, thresholds one, and no signers"
+        );
+        Ok(sent)
     }
 
 
@@ -4931,31 +5360,13 @@ impl MarketDeployer {
             MOp::LockIssuer { leg } => {
                 // The lock is what makes the backing permanent: with the
                 // master weight at zero and every threshold at one, nothing
-                // this account signs can move again. The proof is the ledger
-                // entry of the issuer itself, so a Horizon lag cannot show a
-                // lock that has not been applied.
+                // this account signs can move again. One law with the
+                // backstop custodian's burn, asked of the ledger entry of the
+                // account itself, so a Horizon lag cannot show a lock that has
+                // not been applied.
                 let issuer = self.issuer_of(*leg)?;
-                let before = self
-                    .reader()
-                    .ledger_account(issuer.as_str())?
-                    .ok_or_else(|| anyhow!("the leg's issuer account is not on the network"))?;
-                if before.master_weight != 0 || before.low != 1 || before.med != 1 || before.high != 1
-                {
-                    let issuer_st = self.issuer_st(*leg)?;
-                    issuer_st.tx_lock_account()?;
-                }
-                let locked = self
-                    .reader()
-                    .ledger_account(issuer.as_str())?
-                    .ok_or_else(|| anyhow!("the leg's issuer account is not on the network"))?;
-                anyhow::ensure!(
-                    locked.master_weight == 0
-                        && locked.low == 1
-                        && locked.med == 1
-                        && locked.high == 1
-                        && locked.signers.is_empty(),
-                    "the issuer is not locked: master weight zero, thresholds one, and no signers"
-                );
+                let issuer_st = self.issuer_st(*leg)?;
+                self.ensure_account_burned("leg's issuer", &issuer, &issuer_st)?;
                 // Locked on the ledger, the key can sign nothing; delete it so
                 // no copy outlives the run. Addresses come from the journal,
                 // never this keystore, and an absent key is already the goal.
@@ -5987,46 +6398,154 @@ impl MarketDeployer {
                     json!({"phase": slot.phase, "slot": slot.slot}),
                 )
             }
-            MOp::RealBackstopDeposit => {
-                // The one value-moving coordinate of a real market's launch,
-                // and the only one whose replay would move value twice. Its
-                // proof is the backstop's own record of this pool: a backing
-                // already at the full LP amount settles the coordinate with no
-                // call at all, so neither a lagging read nor a resumed run can
-                // deposit the same backing twice.
-                let backstop = self.deployed_id("backstop")?;
-                let pool = self.deployed_id("pool")?;
+            MOp::CreateCustodian => {
+                // The key is made in this run's own keystore before anything
+                // exists on the network: it *is* the address the custodian
+                // will have, and generating a key that exists reports it
+                // without overwriting, so this coordinate can be replayed. The
+                // seed is copied beside the journal at 0600 — the keystore is a
+                // signing cache, the run directory is the custody a dead runner
+                // restores — and nothing here submits anything to a chain.
+                let local = self.reader();
+                let custodian = local.keys_generate_local(&Self::custodian_key())?;
+                if let Some(known) = self.progress.custodian.as_ref() {
+                    anyhow::ensure!(
+                        known == &custodian,
+                        "this run already created a different backstop custodian"
+                    );
+                }
+                self.persist_custodian_seed()?;
+                self.progress.custodian = Some(custodian.clone());
+                step(
+                    "the custodian's key exists in this run's keystore and its seed is in the run directory at 0600",
+                    None,
+                    json!({"phase": slot.phase, "slot": slot.slot,
+                           "custodian": custodian.as_str()}),
+                )
+            }
+            MOp::FundCustodian => {
+                // The classic `create-account` the runbook uses, signed by the
+                // deployer: the reserve an account must hold to exist, plus the
+                // fee of each of the three transactions the custodian signs
+                // itself. Everything above the reserve comes back at the sweep,
+                // so a custodian costs its fees and not a hold. An account
+                // already present at the recorded address is the proof the send
+                // happened, so a resume cannot fund one twice.
+                let custodian = self.custodian()?;
+                let mut fund_tx: Option<String> = None;
+                if self.reader().ledger_account(custodian.as_str())?.is_none() {
+                    let st = self.operator_st(record)?;
+                    fund_tx = st
+                        .tx_create_account(&custodian, MARKET_CUSTODIAN_FUND_STROOPS)?
+                        .map(|hash| hash.as_str().to_string());
+                    anyhow::ensure!(
+                        self.reader()
+                            .ledger_account(custodian.as_str())?
+                            .is_some(),
+                        "the funded custodian account does not read back"
+                    );
+                }
+                step(
+                    "the custodian account exists, funded by the deployer with its reserve and its own fees",
+                    None,
+                    json!({"phase": slot.phase, "slot": slot.slot,
+                           "custodian": custodian.as_str(),
+                           "amount": MARKET_CUSTODIAN_FUND_STROOPS.to_string(),
+                           "fund_tx": fund_tx}),
+                )
+            }
+            MOp::MoveBacking => {
+                // The backing leaves the deployer's hands before anyone places
+                // it. `comet.transfer` takes the sender's authorization, so this
+                // is the one custody move the operator signs; after it the
+                // operator holds none of the pool's LP, and cannot move any
+                // again — the freeze comes after the deposit, and the custodian
+                // is burned after that. A balance already whole at the
+                // custodian settles the coordinate with no send.
                 let comet = self.deployed_id("comet")?;
+                let custodian = self.custodian()?;
                 let admin = self
                     .progress
                     .admin
                     .as_ref()
                     .ok_or_else(|| anyhow!("the operator is unresolved"))?
                     .clone();
-                let held = self.operator_reader().view(
-                    comet.as_str(),
-                    self.ctx.admin_alias(),
-                    "balance",
-                    &[kv("id", admin.as_str())],
-                )?;
-                let lp = price_as_i128(&held)
-                    .ok_or_else(|| anyhow!("the backing pool reports no balance for its controller"))?;
-                let before = self.backstop_pool_data(&backstop, &pool)?;
-                if before.get("tokens").and_then(price_as_i128).unwrap_or(0) < lp {
+                let total = self.comet_total_supply()?;
+                anyhow::ensure!(
+                    total > 0,
+                    "the pool's backing pool has issued no LP for a custodian to place"
+                );
+                let mut transfer_tx: Option<String> = None;
+                if self.comet_balance(&custodian)? < total {
                     let st = self.operator_st(record)?;
-                    must_ok(
-                        st.invoke(
-                            backstop.as_str(),
-                            self.ctx.admin_alias(),
-                            "deposit",
-                            &[
-                                kv("from", admin.as_str()),
-                                kv("pool_address", pool.as_str()),
-                                kv("amount", lp.to_string()),
-                            ],
-                        )?,
-                        "backstop deposit",
+                    let sent = st.invoke(
+                        comet.as_str(),
+                        self.ctx.admin_alias(),
+                        "transfer",
+                        &[
+                            kv("from", admin.as_str()),
+                            kv("to", custodian.as_str()),
+                            kv("amount", total.to_string()),
+                        ],
                     )?;
+                    transfer_tx = sent.tx_hash().map(|hash| hash.as_str().to_string());
+                    must_ok(sent, "backing transfer")?;
+                }
+                anyhow::ensure!(
+                    self.comet_balance(&custodian)? >= total && self.comet_balance(&admin)? == 0,
+                    "the pool's backing did not move wholly to the custodian"
+                );
+                step(
+                    "the pool's whole LP is held by the custodian and by nobody else",
+                    Some(comet),
+                    json!({"phase": slot.phase, "slot": slot.slot,
+                           "custodian": custodian.as_str(),
+                           "amount": total.to_string(),
+                           "transfer_tx": transfer_tx}),
+                )
+            }
+            MOp::RealBackstopDeposit => {
+                // The one value-moving coordinate of a real market's launch,
+                // and the only one whose replay would move value twice. Its
+                // proof is the backstop's own record of this pool: shares
+                // already at the full LP amount settle the coordinate with no
+                // call at all, so neither a lagging read nor a resumed run can
+                // deposit the same backing twice.
+                //
+                // The custodian, and nobody else, places the backing. The
+                // backstop's `deposit` opens with `from.require_auth()`, so the
+                // account whose LP is being pulled must authorize it, and the
+                // long-lived deployer key is never the party that puts a pool's
+                // collateral at risk — nor the party that can withdraw it.
+                let backstop = self.deployed_id("backstop")?;
+                let pool = self.deployed_id("pool")?;
+                let custodian = self.custodian()?;
+                let admin = self
+                    .progress
+                    .admin
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("the operator is unresolved"))?
+                    .clone();
+                let lp = self.comet_balance(&custodian)?;
+                anyhow::ensure!(
+                    lp > 0 && self.comet_balance(&admin)? == 0,
+                    "the custodian does not hold the pool's whole backing; the deployer must hold none of it"
+                );
+                let mut deposit_tx: Option<String> = None;
+                if self.backstop_shares(&custodian)? == 0 {
+                    let st = self.custodian_st(record)?;
+                    let sent = st.invoke(
+                        backstop.as_str(),
+                        &Self::custodian_key(),
+                        "deposit",
+                        &[
+                            kv("from", custodian.as_str()),
+                            kv("pool_address", pool.as_str()),
+                            kv("amount", lp.to_string()),
+                        ],
+                    )?;
+                    deposit_tx = sent.tx_hash().map(|hash| hash.as_str().to_string());
+                    must_ok(sent, "backstop deposit")?;
                 }
                 let after = self.backstop_pool_data(&backstop, &pool)?;
                 let tokens = after
@@ -6055,15 +6574,94 @@ impl MarketDeployer {
                     tokens >= lp
                         && tokens > 0
                         && fourth == Some(0)
+                        && self.backstop_shares(&custodian)? > 0
                         && value.is_some_and(|v| v >= required),
                     "the deposited backing does not meet the backstop's fourth-power threshold"
                 );
                 step(
-                    "the pool's full LP is held by the backstop and the fourth-power threshold reads back met",
+                    "the pool's full LP is held by the backstop on the custodian's deposit, and the fourth-power threshold reads back met",
                     Some(backstop),
                     json!({"phase": slot.phase, "slot": slot.slot,
+                           "custodian": custodian.as_str(),
                            "tokens": tokens.to_string(), "deposit": tokens.to_string(),
-                           "q4w_pct": fourth.map(|v| v.to_string())}),
+                           "q4w_pct": fourth.map(|v| v.to_string()),
+                           "deposit_tx": deposit_tx}),
+                )
+            }
+            MOp::SweepCustodian => {
+                // What is left of the funding belongs to the key that paid for
+                // it. Everything above the reserve goes back to the deployer,
+                // and the reserve plus the fee of the burn the custodian is
+                // about to sign stays. A balance already at or below that floor
+                // settles the coordinate with no payment at all — which is what
+                // makes a run that died between here and the burn resume with
+                // exactly the burn, and nothing else.
+                let custodian = self.custodian()?;
+                let deployer = self
+                    .progress
+                    .admin
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("the operator is unresolved"))?
+                    .clone();
+                let held = self
+                    .reader()
+                    .ledger_account(custodian.as_str())?
+                    .ok_or_else(|| anyhow!("the custodian account is not on the network"))?;
+                let mut sweep_tx: Option<String> = None;
+                if held.balance_stroops > MARKET_CUSTODIAN_KEEP_STROOPS {
+                    let st = self.custodian_st(record)?;
+                    sweep_tx = st
+                        .tx_payment(
+                            &deployer,
+                            "native",
+                            held.balance_stroops - MARKET_CUSTODIAN_KEEP_STROOPS,
+                        )?
+                        .map(|hash| hash.as_str().to_string());
+                    anyhow::ensure!(
+                        self.reader()
+                            .ledger_account(custodian.as_str())?
+                            .is_some_and(|left| left.balance_stroops
+                                <= MARKET_CUSTODIAN_KEEP_STROOPS),
+                        "the custodian's sweep did not leave it at its reserve"
+                    );
+                }
+                step(
+                    "the custodian holds nothing but its reserve and the fee of its own burn",
+                    None,
+                    json!({"phase": slot.phase, "slot": slot.slot,
+                           "custodian": custodian.as_str(),
+                           "sweep_tx": sweep_tx}),
+                )
+            }
+            MOp::BurnCustodian => {
+                // The reason the phase exists. The custodian still holds the
+                // pool's backstop shares — shares cannot be transferred, which
+                // is why it holds them — and from here it can never sign again,
+                // so no key anyone will ever hold can queue them and put the
+                // pool on ice. One law with the shim issuer's lock, asked of
+                // the account's own ledger entry.
+                let custodian = self.custodian()?;
+                // Refuse to end an account that could still move value: LP left
+                // outside the backstop would be stranded by the burn rather than
+                // placed by it.
+                anyhow::ensure!(
+                    self.comet_balance(&custodian)? == 0,
+                    "the custodian still holds backing LP it has not placed; it cannot be burned yet"
+                );
+                let st = self.custodian_st(record)?;
+                let burned =
+                    self.ensure_account_burned("backstop custodian", &custodian, &st)?;
+                // Inert on the ledger, the key signs nothing; both copies are
+                // deleted so no secret outlives the run. Addresses come from the
+                // journal, never this keystore, and an absent key is the goal.
+                self.reader().keys_remove(&Self::custodian_key())?;
+                let _ = std::fs::remove_file(self.custodian_seed_file());
+                step(
+                    "the custodian can never sign again: master weight zero, thresholds one, no signers",
+                    None,
+                    json!({"phase": slot.phase, "slot": slot.slot,
+                           "custodian": custodian.as_str(),
+                           "burn_tx": burned.map(|hash| hash.as_str().to_string())}),
                 )
             }
             MOp::DropTrust { leg } => {
@@ -7035,34 +7633,83 @@ impl MarketDeployer {
                     .and_then(|config| config.get("status").and_then(Value::as_u64))
                     == Some(u64::from(*to))
             }
+            // The custodian's account exists at the address the coordinate
+            // that created it recorded. Like a leg's issuer, that address is
+            // this run's own knowledge and does not depend on the settlement
+            // that is missing, so the keystore is read as well as the settled
+            // facts: an intent left open by a crash after the send stays
+            // resolvable.
+            MOp::FundCustodian => {
+                let custodian = match self.custodian() {
+                    Ok(custodian) => Some(custodian),
+                    Err(_) => self.reader().keys_public_key(&Self::custodian_key())?,
+                };
+                let Some(custodian) = custodian else {
+                    return Ok(false);
+                };
+                self.reader()
+                    .ledger_account(custodian.as_str())?
+                    .is_some()
+            }
+            // The backing moved when the custodian holds every LP the pool's
+            // backing ever minted. No other account can hold any of it, and no
+            // other submission explains the custodian holding all of it.
+            MOp::MoveBacking => {
+                let Ok(custodian) = self.custodian() else {
+                    return Ok(false);
+                };
+                match (self.comet_total_supply(), self.comet_balance(&custodian)) {
+                    (Ok(total), Ok(held)) => total > 0 && held >= total,
+                    _ => false,
+                }
+            }
             // The deposit is attributable when the backstop holds the LP this
-            // pool's backing minted — a number no other submission explains.
+            // pool's backing minted *and* the custodian holds the shares for
+            // it — a pair of numbers no other submission explains, because the
+            // custodian is an account only this run could have created.
             MOp::RealBackstopDeposit => {
-                let (Ok(backstop), Ok(pool), Ok(comet)) = (
+                let (Ok(backstop), Ok(pool)) = (
                     self.deployed_id("backstop"),
                     self.deployed_id("pool"),
-                    self.deployed_id("comet"),
                 ) else {
                     return Ok(false);
                 };
-                let Some(admin) = self.progress.admin.as_ref() else {
+                let (Ok(custodian), Ok(total)) = (self.custodian(), self.comet_total_supply())
+                else {
                     return Ok(false);
                 };
-                let Ok(lp) = self.operator_reader().view(
-                    comet.as_str(),
-                    self.ctx.admin_alias(),
-                    "balance",
-                    &[kv("id", admin.as_str())],
-                ) else {
+                let Ok(shares) = self.backstop_shares(&custodian) else {
                     return Ok(false);
                 };
-                let Some(lp) = price_as_i128(&lp) else {
+                total > 0
+                    && shares > 0
+                    && self
+                        .backstop_pool_data(&backstop, &pool)
+                        .ok()
+                        .and_then(|data| data.get("tokens").and_then(price_as_i128))
+                        .is_some_and(|held| held >= total)
+            }
+            // The sweep is the balance: nothing above the reserve and the fee
+            // of the burn it still owes is left for it to send.
+            MOp::SweepCustodian => {
+                let Ok(custodian) = self.custodian() else {
                     return Ok(false);
                 };
-                self.backstop_pool_data(&backstop, &pool)
-                    .ok()
-                    .and_then(|data| data.get("tokens").and_then(price_as_i128))
-                    .is_some_and(|held| held >= lp && held > 0)
+                self.reader()
+                    .ledger_account(custodian.as_str())?
+                    .is_some_and(|account| {
+                        account.balance_stroops <= MARKET_CUSTODIAN_KEEP_STROOPS
+                    })
+            }
+            // The burn is the account's own ledger entry, on the one predicate
+            // the shim issuer's lock uses.
+            MOp::BurnCustodian => {
+                let Ok(custodian) = self.custodian() else {
+                    return Ok(false);
+                };
+                self.reader()
+                    .ledger_account(custodian.as_str())?
+                    .is_some_and(|account| account_is_burned(&account))
             }
             // A refresh's effect is not "a refresh was sent": it is the
             // runtime serving this asset. An open intent is settled only when
@@ -7368,6 +8015,10 @@ impl MarketDeployer {
             // The real deposit is a call on the backstop (`deposit(from,
             // pool_address, amount)`), and its step records the backstop.
             MOp::RealBackstopDeposit => "backstop".to_string(),
+            // Moving the backing is a call on the backing pool itself
+            // (`transfer(from, to, amount)`), whose LP the custodian is about
+            // to hold.
+            MOp::MoveBacking => "comet".to_string(),
             MOp::RealDeployLazer { instance } => format!("lazer:{instance}"),
             MOp::RealVerifyRuntime | MOp::RealDeployRuntime => "proxy-runtime".to_string(),
             MOp::RealDeployGovernance => "proxy-governance".to_string(),
@@ -7491,7 +8142,12 @@ impl MarketDeployer {
             | MOp::RealDeployPool
             | MOp::RealQueueReserve { .. }
             | MOp::RealSetReserve { .. }
+            | MOp::CreateCustodian
+            | MOp::FundCustodian
+            | MOp::MoveBacking
             | MOp::RealBackstopDeposit
+            | MOp::SweepCustodian
+            | MOp::BurnCustodian
             | MOp::RealFreezeComet
             | MOp::RealSetStatus { .. }
             | MOp::RealHandoffPool
@@ -10514,7 +11170,12 @@ account_doc() { # $1 = address, $2 = open|locked
         th=01010101
         sg='[{"key":"'"$1"'","weight":1}]'
     fi
-    printf '{"entries":[{"key":{"account":{"account_id":"%s"}},"val":{"account":{"account_id":"%s","balance":"20000000","seq_num":"1","num_sub_entries":1,"inflation_dest":null,"flags":0,"home_domain":"","thresholds":"%s","signers":%s,"ext":"v0"}},"lastModifiedLedgerSeq":1}],"latestLedger":1}\n' "$1" "$1" "$th" "$sg"
+    # An account's XLM is real state here: a sweep is proved by what is left
+    # on the account, so an armed `xlm-<address>` answers exactly, and an
+    # unarmed account holds the ordinary funded balance.
+    bal=20000000
+    if [ -f "$S/xlm-$1" ]; then bal=$(cat "$S/xlm-$1"); fi
+    printf '{"entries":[{"key":{"account":{"account_id":"%s"}},"val":{"account":{"account_id":"%s","balance":"%s","seq_num":"1","num_sub_entries":1,"inflation_dest":null,"flags":0,"home_domain":"","thresholds":"%s","signers":%s,"ext":"v0"}},"lastModifiedLedgerSeq":1}],"latestLedger":1}\n' "$1" "$1" "$bal" "$th" "$sg"
 }
 
 trust_doc() { # $1 = account, $2 = balance
@@ -10624,11 +11285,24 @@ if [ "$1" = keys ] && [ "$2" = public-key ]; then
     exit 1
 fi
 if [ "$1" = keys ] && [ "$2" = generate ]; then
-    printf 'the stand-in holds no key of this name\n' >&2
-    exit 1
+    # A generated key is real state: the address the run will hold comes from
+    # an armed `gen-<name>` (a test decides what the network will derive), and
+    # the keystore file is written as the CLI writes it — a 0600 identity under
+    # the config dir, which is what a run's seed custody copies and restores.
+    name=$3
+    cfg=$(arg --config-dir "$@")
+    f="$S/gen-$name"
+    [ -f "$f" ] || { printf 'no key is armed to generate\n' >&2; exit 1; }
+    printf '%s' "$(cat "$f")" > "$S/key-$name"
+    mkdir -p "$cfg/identity"
+    printf 'seed_phrase = "custard bulb harbor ridge linen velvet cobalt meadow anvil quartz pigeon forest"\n' > "$cfg/identity/$name.toml"
+    chmod 600 "$cfg/identity/$name.toml"
+    exit 0
 fi
 if [ "$1" = keys ] && [ "$2" = rm ]; then
     rm -f "$S/key-$3"
+    cfg=$(arg --config-dir "$@")
+    [ -n "$cfg" ] && rm -f "$cfg/identity/$3.toml"
     exit 0
 fi
 
@@ -10655,6 +11329,9 @@ if [ "$1" = tx ] && [ "$2" = new ]; then
         dest=$(arg --destination "$@")
         [ -n "$dest" ] || { printf 'no destination\n' >&2; exit 1; }
         printf open > "$S/account-$dest"
+        # The funded balance is the account's, so a later sweep can be proved
+        # against it.
+        printf '%s' "$(arg --starting-balance "$@")" > "$S/xlm-$dest"
         exit 0 ;;
     change-trust)
         line=$(arg --line "$@")
@@ -10668,6 +11345,17 @@ if [ "$1" = tx ] && [ "$2" = new ]; then
         if [ -f "$S/fail-payment" ]; then printf 'ambiguous submission\n' >&2; exit 1; fi
         [ -n "$asset" ] && [ -n "$amount" ] || { printf 'no asset\n' >&2; exit 1; }
         printf '%s' "$amount" > "$(trust_path "$asset")"
+        if [ "$asset" = native ]; then
+            # XLM moves between two accounts, from the one that signed it.
+            dest=$(arg --destination "$@")
+            from=$pin
+            held=20000000
+            [ -f "$S/xlm-$from" ] && held=$(cat "$S/xlm-$from")
+            to=0
+            [ -f "$S/xlm-$dest" ] && to=$(cat "$S/xlm-$dest")
+            printf '%s' "$((held - amount))" > "$S/xlm-$from"
+            printf '%s' "$((to + amount))" > "$S/xlm-$dest"
+        fi
         exit 0 ;;
     set-options)
         if [ -f "$S/fail-lock" ]; then printf 'ambiguous submission\n' >&2; exit 1; fi
@@ -10794,9 +11482,48 @@ if [ "$1" = contract ] && [ "$2" = invoke ]; then
         printf 'no asset contract answers here\n' >&2
         exit 1 ;;
     balance)
+        # Balances are per holder: the custodian's LP, the deployer's, and the
+        # backstop's are three different questions, and one answer for all of
+        # them would hide the exact defect this graph exists to prevent. An
+        # account named and holding none of the token is answered zero, as the
+        # token contract answers it; only an unheld query is unanswerable here.
+        who=$(argfn --id "$@")
+        if [ -n "$who" ]; then
+            if [ -f "$S/balance-$cid-$who" ]; then cat "$S/balance-$cid-$who"; printf '\n'; exit 0; fi
+            if [ -f "$S/balance-$cid" ]; then cat "$S/balance-$cid"; printf '\n'; exit 0; fi
+            printf '"0"\n'
+            exit 0
+        fi
         if [ -f "$S/balance-$cid" ]; then cat "$S/balance-$cid"; printf '\n'; exit 0; fi
         printf 'no balance is armed\n' >&2
         exit 1 ;;
+    transfer)
+        # A token transfer between two accounts, refused when the sender
+        # cannot cover it, as the token contract refuses it.
+        from=$(argfn --from "$@")
+        to=$(argfn --to "$@")
+        amount=$(argfn --amount "$@")
+        if [ -z "$from" ] || [ -z "$to" ] || [ -z "$amount" ]; then
+            printf 'a transfer names a from, a to, and an amount\n' >&2
+            exit 1
+        fi
+        if [ -f "$S/fail-transfer" ]; then printf 'error: refused\n' >&2; exit 1; fi
+        held=0
+        [ -f "$S/balance-$cid-$from" ] && held=$(cat "$S/balance-$cid-$from")
+        [ "$held" -ge "$amount" ] || { printf 'error: insufficient balance\n' >&2; exit 1; }
+        recv=0
+        [ -f "$S/balance-$cid-$to" ] && recv=$(cat "$S/balance-$cid-$to")
+        printf '%s' "$((held - amount))" > "$S/balance-$cid-$from"
+        printf '%s' "$((recv + amount))" > "$S/balance-$cid-$to"
+        printf 'true\n'
+        exit 0 ;;
+    user_balance)
+        # One account's standing in one pool. An account that has never
+        # deposited is answered as the contract answers it: zero shares.
+        f="$S/shares-$cid-$(argfn --user "$@")"
+        if [ -f "$f" ]; then cat "$f"; printf '\n'; exit 0; fi
+        printf '{"shares":"0","q4w":[]}\n'
+        exit 0 ;;
     pool_data)
         if [ -f "$S/pool-data-after-$cid" ]; then
             n=$(cat "$S/pool-data-count-$cid" 2>/dev/null || printf '0')
@@ -10829,6 +11556,23 @@ if [ "$1" = contract ] && [ "$2" = invoke ]; then
         exit 1 ;;
     deposit)
         if [ -f "$S/fail-deposit" ]; then printf 'error: refused\n' >&2; exit 1; fi
+        # A deposit is not a no-op here: the LP leaves the depositor's account
+        # and that account gains shares of the pool it backed. Those two
+        # numbers are exactly what the run's completion readbacks ask the
+        # network, so the stand-in has to hold them.
+        from=$(argfn --from "$@")
+        amount=$(argfn --amount "$@")
+        if [ -n "$from" ]; then
+            printf '{"shares":"%s","q4w":[]}' "${amount:-0}" > "$S/shares-$cid-$from"
+            rm -f "$S"/balance-*-"$from"
+            # The pool's reserves are what a deposit changed: a test arms the
+            # post-deposit figures once, and they become the answer only after
+            # a deposit has actually been made. An account that has backed the
+            # pool is the cause; the readback reporting it is the effect.
+            if [ -f "$S/pool-data-after-$cid" ]; then
+                cp "$S/pool-data-after-$cid" "$S/pool-data-$cid"
+            fi
+        fi
         printf 'true\n'
         exit 0 ;;
     get_proxy)
@@ -10916,6 +11660,11 @@ if [ "$1" = contract ] && [ "$2" = invoke ]; then
         printf ']\n'
         exit 0 ;;
     get_total_supply)
+        # What the backing pool has ever minted: a test arms the LP it put in
+        # the controller's account, and the two answers must agree, because the
+        # run measures a moved backing against this number.
+        f="$S/total-supply-$cid"
+        if [ -f "$f" ]; then cat "$f"; printf '\n'; exit 0; fi
         printf '"1000000000"\n'
         exit 0 ;;
     config)
@@ -11412,6 +12161,36 @@ exit 1
             for (role, id) in known {
                 d.deployed.insert(role.to_string(), id);
             }
+        }
+
+        /// The run's backstop custodian, arrived at the way a run arrives at
+        /// it: the coordinate is executed, its key is generated in the run's
+        /// own keystore, its seed is written beside the journal, and its
+        /// address is settled into the journal — so every deployer that
+        /// rebuilds from this run directory afterwards knows who holds the
+        /// backing, exactly as a resumed one would.
+        fn arm_custodian(&self, d: &mut MarketDeployer, custodian: &AccountId) {
+            self.arm(
+                &format!("gen-{}", MarketDeployer::custodian_key()),
+                custodian.as_str(),
+            );
+            let slot = self.slot(&MOp::CreateCustodian);
+            self.execute(d, &slot, &self.admin, None);
+            assert_eq!(
+                d.progress.custodian.as_ref(),
+                Some(custodian),
+                "the key coordinate did not record the custodian it created"
+            );
+        }
+
+        /// The LP one account holds at the backing pool, armed directly. A test
+        /// that says who holds the pool's backing is stating the very thing the
+        /// run is required to prove, so it states it per holder.
+        fn arm_lp(&self, comet: &ContractId, holder: &AccountId, amount: &str) {
+            self.arm(
+                &format!("balance-{}-{}", comet.as_str(), holder.as_str()),
+                amount,
+            );
         }
 
         /// Open the confirmation gate for one coordinate, exactly as a run
@@ -13950,6 +14729,285 @@ exit 1
         market.clean();
     }
 
+    /// The standing reserves a fresh pool's deposit must show to satisfy the
+    /// fourth-power law the shim seed was derived under. The backstop reports
+    /// them only after the deposit has been made, so this is armed once and the
+    /// network's own deposit changes what the pool answers.
+    fn arm_deposit_readback(market: &RealMarket, backstop: &ContractId) {
+        let (blnd, usdc) = crate::manifest::market_shim_seed();
+        market.backstop_data(
+            backstop,
+            &format!(
+                "{{\"tokens\":\"1000000000\",\"blnd\":\"{blnd}\",\"usdc\":\"{usdc}\",\"q4w_pct\":\"0\"}}"
+            ),
+        );
+    }
+
+    /// The backstop's `deposit` opens with `from.require_auth()`, so the
+    /// account whose LP is being pulled must sign for it: the deposit is the
+    /// custodian's call and never the deployer's. A run that left any of the
+    /// backing in the deployer's hands is refused before anything is submitted.
+    #[test]
+    fn the_backstop_deposit_is_the_custodians_and_never_the_deployers() {
+        for (deployer_holds, expect_settled) in [("0", true), ("1", false)] {
+            let market = a_real_market(&format!("custodian-from-{deployer_holds}"), false, false);
+            let mut d = market.run(false);
+            let (backstop, pool, comet) = (fixture_contract(80), fixture_contract(81), fixture_contract(82));
+            market.arm_deployed(
+                &mut d,
+                [
+                    ("backstop", backstop.clone()),
+                    ("pool", pool.clone()),
+                    ("comet", comet.clone()),
+                ],
+            );
+            let custodian = fixture_actor(77);
+            let deployer = d.progress.admin.clone().expect("the operator is resolved");
+            market.arm_custodian(&mut d, &custodian);
+            market.arm_lp(&comet, &custodian, "1000000000");
+            market.arm_lp(&comet, &deployer, deployer_holds);
+            market.arm(
+                &format!("total-supply-{}", comet.as_str()),
+                "\"1000000000\"",
+            );
+            arm_deposit_readback(&market, &backstop);
+            let outcome = market.confirm(&mut d, &MOp::RealBackstopDeposit);
+            if expect_settled {
+                if let Err(e) = &outcome {
+                    panic!("a custodian holding the whole backing was refused: {e:#}");
+                }
+            }
+            let settled = outcome.is_ok()
+                && market.settled(&market.slot(&MOp::RealBackstopDeposit));
+            assert_eq!(
+                settled, expect_settled,
+                "a deployer holding {deployer_holds} of the backing must settle the deposit: {deployer_holds}"
+            );
+            let calls = market.calls();
+            let deposit = calls
+                .lines()
+                .find(|line| {
+                    line.starts_with("contract invoke")
+                        && line.contains(" deposit ")
+                        && line.contains(&format!("--id {}", backstop.as_str()))
+                })
+                .unwrap_or_default()
+                .to_string();
+            if expect_settled {
+                assert!(
+                    deposit.contains(&format!("--from {}", custodian.as_str())),
+                    "the deposit named someone other than the custodian as its source: {deposit}"
+                );
+                assert!(
+                    !deposit.contains(&format!("--from {}", deployer.as_str())),
+                    "the deployer placed the backing it was never given: {deposit}"
+                );
+                assert!(
+                    deposit.contains(&format!("--source {}", custodian.as_str())),
+                    "the deposit was not signed by the account whose LP it is: {deposit}"
+                );
+            } else {
+                assert!(
+                    deposit.is_empty(),
+                    "a deposit was submitted while the deployer still held the backing"
+                );
+            }
+        }
+    }
+
+    /// A run whose runner died after the sweep owes exactly one transaction:
+    /// the burn. Nothing that already landed is sent again — no funding, no
+    /// transfer, no deposit, no second payment.
+    #[test]
+    fn a_run_resumed_after_the_sweep_sends_exactly_the_burn() {
+        let market = a_real_market("custodian-resume-burn", false, false);
+        let mut d = market.run(false);
+        let (backstop, pool, comet) = (fixture_contract(80), fixture_contract(81), fixture_contract(82));
+        market.arm_deployed(
+            &mut d,
+            [
+                ("backstop", backstop.clone()),
+                ("pool", pool.clone()),
+                ("comet", comet.clone()),
+            ],
+        );
+        let custodian = fixture_actor(78);
+        let deployer = d.progress.admin.clone().expect("the operator is resolved");
+        market.arm(
+            &format!("gen-{}", MarketDeployer::custodian_key()),
+            custodian.as_str(),
+        );
+        market.arm_lp(&comet, &deployer, "1000000000");
+        market.arm(
+            &format!("total-supply-{}", comet.as_str()),
+            "\"1000000000\"",
+        );
+        arm_deposit_readback(&market, &backstop);
+        for op in [
+            MOp::CreateCustodian,
+            MOp::FundCustodian,
+            MOp::MoveBacking,
+            MOp::RealBackstopDeposit,
+            MOp::SweepCustodian,
+        ] {
+            market
+                .confirm(&mut d, &op)
+                .unwrap_or_else(|e| panic!("{op:?} owed nothing: {e:#}"));
+            assert!(market.settled(&market.slot(&op)), "{op:?} did not settle");
+        }
+        let before = market.calls();
+        let count = |needle: &str| {
+            before
+                .lines()
+                .filter(|line| line.contains(needle))
+                .count()
+        };
+        assert_eq!(count("tx new payment"), 1, "the sweep submitted exactly one payment");
+        assert_eq!(count("tx new set-options"), 0, "nothing was burned yet");
+
+        // A fresh process for the same run directory: the journal, not the
+        // keystore, is what it starts from. The ids it rebuilt are stated as
+        // the fixture states them, exactly as the journal gave them to the
+        // first pass.
+        let mut resumed = market.run(false);
+        market.arm_deployed(
+            &mut resumed,
+            [
+                ("backstop", backstop.clone()),
+                ("pool", pool.clone()),
+                ("comet", comet.clone()),
+            ],
+        );
+        market
+            .confirm(&mut resumed, &MOp::SweepCustodian)
+            .expect("a settled sweep asks nothing of the network");
+        market
+            .confirm(&mut resumed, &MOp::BurnCustodian)
+            .expect("the burn is the only thing owed");
+        let after = market.calls();
+        let added = |needle: &str| {
+            after
+                .lines()
+                .skip(before.lines().count())
+                .filter(|line| line.contains(needle))
+                .count()
+        };
+        assert_eq!(added("tx new set-options"), 1, "exactly the burn was sent");
+        for needle in [
+            "tx new payment",
+            "tx new create-account",
+            " deposit ",
+            " transfer ",
+        ] {
+            assert_eq!(added(needle), 0, "a settled coordinate re-sent {needle:?}");
+        }
+        assert!(market.settled(&market.slot(&MOp::BurnCustodian)), "the burn did not settle");
+        assert!(
+            !market.out.join("backstop-custodian.seed").exists(),
+            "a burned custodian's seed outlives its key"
+        );
+    }
+
+    /// A burn the ledger already proves is not submitted again, however many
+    /// times the run is restarted.
+    #[test]
+    fn a_run_resumed_after_the_burn_sends_nothing() {
+        let market = a_real_market("custodian-resume-idle", false, false);
+        let mut d = market.run(false);
+        let (backstop, pool, comet) = (fixture_contract(80), fixture_contract(81), fixture_contract(82));
+        market.arm_deployed(
+            &mut d,
+            [
+                ("backstop", backstop.clone()),
+                ("pool", pool.clone()),
+                ("comet", comet.clone()),
+            ],
+        );
+        let custodian = fixture_actor(79);
+        let deployer = d.progress.admin.clone().expect("the operator is resolved");
+        market.arm(
+            &format!("gen-{}", MarketDeployer::custodian_key()),
+            custodian.as_str(),
+        );
+        market.arm_lp(&comet, &deployer, "1000000000");
+        market.arm(
+            &format!("total-supply-{}", comet.as_str()),
+            "\"1000000000\"",
+        );
+        arm_deposit_readback(&market, &backstop);
+        for op in [
+            MOp::CreateCustodian,
+            MOp::FundCustodian,
+            MOp::MoveBacking,
+            MOp::RealBackstopDeposit,
+            MOp::SweepCustodian,
+            MOp::BurnCustodian,
+        ] {
+            market
+                .confirm(&mut d, &op)
+                .unwrap_or_else(|e| panic!("{op:?} owed nothing: {e:#}"));
+        }
+        let before = market.calls();
+        let mut again = market.run(false);
+        market
+            .confirm(&mut again, &MOp::BurnCustodian)
+            .expect("a proven burn settles without a send");
+        let sent = market
+            .calls()
+            .lines()
+            .skip(before.lines().count())
+            .filter(|line| line.contains("tx new set-options"))
+            .count();
+        assert_eq!(sent, 0, "a custodian the ledger already burned was burned again");
+    }
+
+    /// The custodian is an output of the run, never an input: the plan a PR
+    /// reviews is frozen before any key exists. Two runs of one configuration
+    /// bind the same graph — the same coordinates, in the same order, with the
+    /// same signing salts — although their custodians differ, and neither plan
+    /// names the address that run will invent. The coordinates a reviewer must
+    /// see include the ones that create, fund, move, deposit, sweep and burn the
+    /// holder.
+    #[test]
+    fn the_plan_does_not_bind_the_custodian_it_has_not_yet_created() {
+        let planned = |index: u8, who: AccountId| {
+            let market = a_real_market(&format!("custodian-plan-{index}"), false, false);
+            market.arm(
+                &format!("gen-{}", MarketDeployer::custodian_key()),
+                who.as_str(),
+            );
+            let mut d = market.run(false);
+            market
+                .confirm(&mut d, &MOp::CreateCustodian)
+                .expect("the key coordinate needs no chain");
+            assert_eq!(
+                d.progress.custodian.as_ref(),
+                Some(&who),
+                "the run did not create the custodian it was told to"
+            );
+            let plan = d.frozen_plan();
+            let text = toml::to_string_pretty(&plan).expect("the plan renders");
+            assert!(
+                !text.contains(who.as_str()),
+                "the frozen plan bound the custodian's address"
+            );
+            for coordinate in (1..=6u32).map(|slot| (10u32, slot)) {
+                assert!(
+                    plan.slots.contains(&coordinate),
+                    "the plan omits the custody coordinate {coordinate:?} a reviewer must see"
+                );
+            }
+            (plan.slots, plan.salt_roles)
+        };
+        let first = planned(0, fixture_actor(81));
+        let second = planned(1, fixture_actor(82));
+        assert_ne!(first.0, vec![], "the plan named no coordinates at all");
+        assert_eq!(
+            first, second,
+            "two runs of one configuration bound different graphs"
+        );
+    }
+
     /// The backstop's threshold is the runbook's law on the reserves it
     /// reports: seven-decimal stroops floored to whole tokens, the smaller
     /// leg to the fourth power times the larger, at or above 1e25 — plus a
@@ -14021,6 +15079,15 @@ exit 1
                 ],
             );
             market.arm(&format!("balance-{comet}"), "1000000000");
+            // The backing is the custodian's by the time a deposit is asked
+            // for: the coordinates before this one moved it there, and the
+            // deployer holds none of it.
+            let custodian = fixture_actor(70);
+            let deployer = d.progress.admin.clone().expect("the operator is resolved");
+            market.arm_custodian(&mut d, &custodian);
+            market.arm_lp(&comet, &custodian, "1000000000");
+            market.arm_lp(&comet, &deployer, "0");
+            market.arm(&format!("total-supply-{}", comet.as_str()), "\"1000000000\"");
             market.backstop_data(
                 &backstop,
                 "{\"tokens\":\"0\",\"blnd\":\"0\",\"usdc\":\"0\",\"q4w_pct\":\"0\"}",
@@ -14683,6 +15750,21 @@ exit 1
             ],
         );
         market.arm(&format!("balance-{comet}"), "1000000000");
+        // The custody the deposit is attributable to: the custodian placed the
+        // backing and holds the shares for it, and it has been burned. Without
+        // a holder the reconciliation has nothing to attribute the deposit to,
+        // exactly as it has nothing on a network where someone else put it up.
+        let custodian = fixture_actor(71);
+        market.arm_custodian(&mut d, &custodian);
+        market.arm(
+            &format!("total-supply-{}", comet.as_str()),
+            "\"1000000000\"",
+        );
+        market.arm(
+            &format!("shares-{}-{}", backstop.as_str(), custodian.as_str()),
+            "{\"shares\":\"1000000000\",\"q4w\":[]}",
+        );
+        market.arm(&format!("account-{}", custodian.as_str()), "locked");
         let (blnd, usdc) = crate::manifest::market_shim_seed();
         market.backstop_data(
             &backstop,

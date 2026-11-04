@@ -2805,6 +2805,19 @@ pub struct RealMarketManifest {
     /// kept the pool, and in manifests written before handoffs existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_admin: Option<String>,
+    /// The backstop shares of this pool are held by this account — a key this
+    /// run generated for no other purpose, which placed the backing itself.
+    /// It is absent only in manifests written before the backing had a holder
+    /// nobody could sign for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backstop_custodian: Option<AccountId>,
+    /// The transaction that burned the custodian: master weight zero,
+    /// thresholds one, no signers, so nobody can ever queue its shares again.
+    /// Absent for a burn that settled by reconciliation, which had no command
+    /// output to read — the account's own ledger entry is the proof either
+    /// way, and the run refuses to publish without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backstop_custodian_burn_tx: Option<crate::stellar::TxHash>,
 }
 
 /// One real asset's own price stack, as configured on the runtime. Sources
