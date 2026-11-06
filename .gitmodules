@@ -1,0 +1,3 @@
+[submodule "docs-library"]
+	path = docs-library
+	url = https://github.com/Templar-Protocol/precept-docs.git
