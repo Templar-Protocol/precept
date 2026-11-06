@@ -49,24 +49,24 @@ invariants, what each one means, and the assumptions it is proven under.
 Build the contracts with:
 
 ```
-make
+just
 ```
 
 Run all unit tests and the integration test suite with:
 
 ```
-make test
+just test
 ```
 
 Explicit base-versus-fork differential (ADR 0008 / ADR 0011; builds the pinned stock baseline from git). Run inside `devenv shell`, which provides the pinned Stellar CLI:
 
 ```
-make differential
+just differential
 ```
 
 ## Deployment
 
-The `make` command creates an optimized and un-optimized set of WASM contracts. It's recommended to use the optimized version if deploying to a network.
+The `just` command (default recipe `build`) creates an optimized and un-optimized set of WASM contracts. It's recommended to use the optimized version if deploying to a network.
 
 These can be found at the path:
 

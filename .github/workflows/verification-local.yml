@@ -23,6 +23,9 @@ jobs:
     - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd
       with:
         version: 28.1.0
+    - uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46
+      with:
+        tool: just
     - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
         path: |
@@ -46,11 +49,11 @@ jobs:
     - name: Provision pinned Verus and isolated compiler
       run: python3 scripts/verify_local.py --seconds 900 -- python3 scripts/provision_verus.py
     - name: Prepare Wasm imports
-      run: python3 scripts/verify_local.py --seconds 900 -- make build
+      run: python3 scripts/verify_local.py --seconds 900 -- just build
     - name: Compile proof configurations without changing proof deadlines
-      run: make verify-local-codegen
+      run: just verify-local-codegen
     - name: Verify the complete local acceptance set
-      run: make verify-local
+      run: just verify-local
     - name: Retain proof and containment logs
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -75,20 +78,23 @@ jobs:
     - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd
       with:
         version: 28.1.0
-    - run: python3 scripts/verify_local.py --seconds 900 -- make build
+    - uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46
+      with:
+        tool: just
+    - run: python3 scripts/verify_local.py --seconds 900 -- just build
     - name: Provision standalone fuzz toolchain
       run: |
         nightly=$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("test-suites/fuzz/rust-toolchain.toml").read_text())["toolchain"]["channel"])')
         python3 scripts/verify_local.py --seconds 900 -- rustup toolchain install --profile minimal "$nightly"
         python3 scripts/verify_local.py --seconds 900 -- cargo install --locked cargo-fuzz --version 0.13.2
     - name: Lint the standalone fuzz package
-      run: python3 scripts/verify_local.py --seconds 1800 -- make fuzz-lint
+      run: python3 scripts/verify_local.py --seconds 1800 -- just fuzz-lint
     - name: Check fuzz arithmetic and failure classification
-      run: python3 scripts/verify_local.py --seconds 1800 -- make fuzz-test
+      run: python3 scripts/verify_local.py --seconds 1800 -- just fuzz-test
     - name: Replay committed financial regression seeds
-      run: python3 scripts/verify_local.py --seconds 1800 -- make fuzz-replay
+      run: python3 scripts/verify_local.py --seconds 1800 -- just fuzz-replay
     - name: Build the mutation fuzz target
-      run: python3 scripts/verify_local.py --seconds 1800 -- make fuzz-build
+      run: python3 scripts/verify_local.py --seconds 1800 -- just fuzz-build
     - name: Retain replay and containment logs
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

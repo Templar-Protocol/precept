@@ -58,7 +58,10 @@ jobs:
     - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
       with:
         version: 28.1.0
-    - run: make test
+    - uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46
+      with:
+        tool: just
+    - run: just test
 
   kani-codegen:
     runs-on: ubuntu-latest
@@ -73,9 +76,12 @@ jobs:
     - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
       with:
         version: 28.1.0
+    - uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46
+      with:
+        tool: just
     # contractimport! reads target/wasm32v1-none/release/backstop.wasm at compile
     # time, so the proof surface does not compile without the wasm on disk.
-    - run: make build
+    - run: just build
     - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
         path: |
@@ -93,7 +99,7 @@ jobs:
     - run: test -d "$HOME/.kani/kani-$KANI_VERSION" || cargo-kani setup
     # sccache, which stellar/actions/rust-cache installs as RUSTC_WRAPPER, probes
     # the compiler with -E and kani-compiler rejects it, so it cannot wrap Kani.
-    # Cleared here rather than job-wide so make build and the install keep it.
+    # Cleared here rather than job-wide so just build and the install keep it.
     - run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
     - run: cargo kani --version
     - run: cargo kani -p pool --lib --only-codegen
@@ -112,7 +118,10 @@ jobs:
     - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
       with:
         version: 28.1.0
-    - run: make build
+    - uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46
+      with:
+        tool: just
+    - run: just build
     - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
         path: |
@@ -130,7 +139,7 @@ jobs:
     - run: test -d "$HOME/.kani/kani-$KANI_VERSION" || cargo-kani setup
     # sccache, which stellar/actions/rust-cache installs as RUSTC_WRAPPER, probes
     # the compiler with -E and kani-compiler rejects it, so it cannot wrap Kani.
-    # Cleared here rather than job-wide so make build and the install keep it.
+    # Cleared here rather than job-wide so just build and the install keep it.
     - run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
     - name: Verify the per-PR harness set
       run: |

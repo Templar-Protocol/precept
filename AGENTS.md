@@ -15,7 +15,7 @@ flowchart LR
   P -- SEP-40 PriceFeedClient --> A[pool-oracle-adapter] --> R[Templar proxy runtime]
 ```
 
-- **Build order matters.** `pool` imports the *built* backstop wasm (`pool/src/dependencies/backstop.rs`, reads `target/wasm32v1-none/release/backstop.wasm`). `backstop` does the same for the factory. Run `make build` before `cargo test`, Kani, or IDE checks of `pool`.
+- **Build order matters.** `pool` imports the *built* backstop wasm (`pool/src/dependencies/backstop.rs`, reads `target/wasm32v1-none/release/backstop.wasm`). `backstop` does the same for the factory. Run `just build` before `cargo test`, Kani, or IDE checks of `pool`.
 - **Entrypoint pattern** (`*/src/contract.rs`): `storage::extend_instance(&e)` → `admin.require_auth()` (or the user) → delegate to a module → emit an event. `submit` authorises `spender`, plus `from` only when it differs.
 - **The fork in code** (full table: `docs/changes-from-blend-v2.md`):
   - Disabled with `panic_with_error!(BadRequest)`: pool `update_pool`, `flash_loan`, `set_emissions_config`; backstop `distribute`, `gulp_emissions`, `add_reward`, `remove_reward`, `claim`, `drop`. Bad-debt and interest auctions (request types 7/8) are unreachable.
@@ -49,13 +49,13 @@ flowchart LR
 Enter the dev shell first: `devenv shell` (or direnv `use devenv`). It pins Rust 1.98.0 and builds Stellar CLI 28.1.0, exported as `PRECEPT_STELLAR_BIN`.
 
 ```bash
-make                      # build factory → backstop → pool wasm + stellar contract optimize
-make test                 # make build, then cargo test --all --tests
-cargo test -p test-suites --test <file>   # one integration file (after make build)
-make fmt                  # CI runs cargo fmt --all --check
-make differential         # stock-vs-fork ADR-8 differential (pinned base 6cf6dd1, #[ignore]d runner)
-make verify-local         # Python gates + Kani/Verus acceptance set under resource containment
-make fuzz-test fuzz-replay fuzz-lint fuzz-build
+just                      # build factory → backstop → pool wasm + stellar contract optimize
+just test                 # just build, then cargo test --all --tests
+cargo test -p test-suites --test <file>   # one integration file (after just build)
+just fmt                  # CI runs cargo fmt --all --check
+just differential         # stock-vs-fork ADR-8 differential (pinned base 6cf6dd1, built with its own Makefile)
+just verify-local         # Python gates + Kani/Verus acceptance set under resource containment
+just fuzz-test fuzz-replay fuzz-lint fuzz-build
 (cd pool-oracle-adapter && just audit-ready)   # adapter gate: fmt, clippy, tests, build, spec and size checks
 (cd tools/abtest && just check)                # abtest tests + clippy -D warnings
 python3 registry/registry.py check         # registry schema and canonical order (offline)
@@ -63,7 +63,7 @@ python3 scripts/check_docs.py              # docs/ SUMMARY and link gate
 (cd sign && bun test)
 ```
 
-Kani: run `make build` first, unset `RUSTC_WRAPPER` (sccache breaks kani-compiler), and always pass `--exact`:
+Kani: run `just build` first, unset `RUSTC_WRAPPER` (sccache breaks kani-compiler), and always pass `--exact`:
 `cargo kani -p pool --lib --exact --harness <path::name> --solver kissat -Z unstable-options --harness-timeout 600s`.
 
 ## Code Conventions & Common Patterns
@@ -79,7 +79,7 @@ Kani: run `make build` first, unset `RUSTC_WRAPPER` (sccache breaks kani-compile
 ## Important Files
 
 - `pool/src/contract.rs`: the pool's public API. `pool/src/pool/status.rs`: status machine. `pool/src/storage.rs`: keys and TTLs.
-- `Cargo.toml` (workspace, release profile), `rust-toolchain.toml` (1.98.0, `wasm32v1-none`), `Makefile`, `devenv.nix`.
+- `Cargo.toml` (workspace, release profile), `rust-toolchain.toml` (1.98.0, `wasm32v1-none`), `justfile` (all build, test and verification recipes; there is no Makefile), `devenv.nix`.
 - `.github/workflows/pull_request.yml`: required gates. `release.yml`: reproducible wasm + `SHA256SUMS`. `pool-plan.yml` / `pool-deploy.yml`: digest-approved deploys.
 - `registry/README.md`: registry schema and pool deploy flow. `scripts/pool_deploy_ci.py`: plan/deploy orchestration.
 - `VERIFICATION.md`, `docs/verification/`: formal verification. `docs/changes-from-blend-v2.md`: fork delta.
@@ -97,7 +97,7 @@ Kani: run `make build` first, unset `RUSTC_WRAPPER` (sccache breaks kani-compile
 
 - **Rust**: soroban-sdk testutils. Unit tests sit in `#[cfg(test)] mod tests` at the bottom of each module. Integration tests use `TestFixture::create(wasm: bool)` / `create_fixture_with_data` (`test-suites/src/`): fixed ledger, `mock_all_auths`, tokens indexed by the `TokenIndex` enum, helpers `jump()`, `create_pool_reserve`, `assert_approx_eq_abs`. Assert auth via `env.auths()`.
 - `test_snapshots/` is gitignored. Don't commit generated snapshots. The only committed snapshot is `test-suites/src/mainnet-55261759-snapshot.json`.
-- **Fuzz**: committed regression seeds go in `test-suites/fuzz/regression-seeds/` as JSON and replay with `make fuzz-replay`.
+- **Fuzz**: committed regression seeds go in `test-suites/fuzz/regression-seeds/` as JSON and replay with `just fuzz-replay`.
 - **Formal**: the PR set is `verification/kani-ci-harnesses.txt`, checked by `scripts/check_kani_ci.py`. The cover counts in `verification/kani-expected-covers.json` must match exactly, including zero. The full set runs weekly. Verus runs with `--no-cheating` and needs a negative-control mutation.
 - **Required PR gates**: `fmt`, `build-and-test`, `kani-codegen`, `kani-proofs`, `local-verification`. Registry, docs, adapter and abtest workflows trigger on their own paths.
 - **Mainnet safety**: the only CI path that sends transactions is `pool-deploy.yml`, running a plan whose digest was approved by merging the PR. CI never calls `set_status`; activation is the curator's call. The curator must call `accept_admin` within 10 days of `propose_admin`, or the proposal lapses.

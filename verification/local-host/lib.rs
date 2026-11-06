@@ -6,7 +6,7 @@
 //! footprint, not arbitrary-length collection induction. Out-of-footprint reserve
 //! operations fail closed instead of returning a fake financial result.
 //! The expanded price-cache/reset probe timed out at 180 seconds and is excluded
-//! from make verify-local; only the passing price/decimals rules are accepted.
+//! from just verify-local; only the passing price/decimals rules are accepted.
 #![allow(dead_code)]
 
 extern crate self as sep_40_oracle;
