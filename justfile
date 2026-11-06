@@ -8,11 +8,15 @@ set dotenv-load := false
 root := justfile_directory()
 
 # Build factory → backstop → pool (+ oracle-tripper and any other crate wasm
-# in the workspace), then optimize them.
+# in the workspace), then optimize them. The smart-account policy lives in its
+# own nested workspace (it pins soroban-sdk 28, the sdk the deployed OpenZeppelin
+# account is built against), so it is built separately and its artifacts are
+# placed beside the rest.
 default: build
 
 test: build
     cargo test --all --tests
+    cargo test --manifest-path smart-account-policies/Cargo.toml
 
 build:
     cargo rustc --locked --manifest-path=pool-factory/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
@@ -21,6 +25,11 @@ build:
     # stellar-access (OpenZeppelin Ownable) turns on soroban-sdk's spec-shaking v2,
     # which only the Stellar CLI's build can link; same output path as cargo rustc.
     stellar contract build --locked --package oracle-tripper
+    # Nested sdk-28 workspace (OpenZeppelin smart-account policy); its wasm is
+    # copied into the root release dir so the optimize step and release.yml see it.
+    stellar contract build --locked \
+        --manifest-path smart-account-policies/pool-pause-policy/Cargo.toml \
+        --out-dir target/wasm32v1-none/release
     mkdir -p target/wasm32v1-none/optimized
     stellar contract optimize \
         --wasm target/wasm32v1-none/release/pool_factory.wasm \
@@ -34,6 +43,9 @@ build:
     stellar contract optimize \
         --wasm target/wasm32v1-none/release/oracle_tripper.wasm \
         --wasm-out target/wasm32v1-none/optimized/oracle_tripper.wasm
+    stellar contract optimize \
+        --wasm target/wasm32v1-none/release/pool_pause_policy.wasm \
+        --wasm-out target/wasm32v1-none/optimized/pool_pause_policy.wasm
     cd target/wasm32v1-none/optimized/ && ls -l *.wasm
 
 # Explicit base-versus-fork differential (ADR 0008 step 8 / ADR 0011 step 5).
@@ -99,6 +111,7 @@ fuzz-build:
 fmt:
     cargo fmt --all
     cargo fmt --manifest-path test-suites/fuzz/Cargo.toml --all
+    cargo fmt --manifest-path smart-account-policies/Cargo.toml --all
 
 clean:
     cargo clean

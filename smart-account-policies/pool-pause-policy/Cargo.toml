@@ -1,0 +1,21 @@
+[package]
+name = "pool-pause-policy"
+version = "0.1.0"
+authors = ["Blend Capital <gm@blend.capital>"]
+edition = "2021"
+rust-version.workspace = true
+publish = false
+license = "MIT"
+description = "Stateless smart-account policy that authorizes only set_status(2) on the pool its rule is scoped to"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+stellar-accounts = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+sha2 = "0.10"
