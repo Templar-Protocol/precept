@@ -29,7 +29,7 @@ deliberately, never as a side effect of a toolchain bump.
   `STELLAR_BIN="$PRECEPT_STELLAR_BIN"` for raw cargo invocations.
   The pool-oracle-adapter has its own frozen artifact-producer CLI pin; see
   `pool-oracle-adapter/`.
-- Optimized artifacts from `precept` (the Blend v2 fork): fork-side from `make build`
+- Optimized artifacts from `precept` (the Blend v2 fork): fork-side from `just build`
   under `target/wasm32v1-none/optimized` (Rust 1.98, soroban-sdk 25.3.0); the stock
   baseline separately under `target/adr8-base/target/wasm32-unknown-unknown/optimized`.
 - Mock oracle/token/emitter Wasm from the cargo registry (paths in `pairs/*.toml`).

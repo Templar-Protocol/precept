@@ -206,8 +206,8 @@ is no `all`.
   **>= 26.1.0** and takes the exact binary devenv exports as
   `PRECEPT_STELLAR_BIN` (raw cargo invocations: `STELLAR_BIN="$PRECEPT_STELLAR_BIN"`).
   The `stellar` on `PATH` in the devenv shell satisfies both gates.
-- **Wasm inputs** come from this repository: fork-side from `make build` under
-  `../../target/wasm32v1-none/optimized`, the stock baseline from `make differential`
+- **Wasm inputs** come from this repository: fork-side from `just build` under
+  `../../target/wasm32v1-none/optimized`, the stock baseline from `just differential`
   under `../../target/adr8-base/target/wasm32-unknown-unknown/optimized`, plus registry mock
   token/oracle/emitter wasm; `pairs/*.toml` holds the paths
   (`README.md:30-35`). The market's proxy stack is the exception:
@@ -252,7 +252,7 @@ is no `all`.
   `renders_at_every_size_without_panicking`), and determinism (`scenario.rs`).
 - CI: `.github/workflows/abtest.yml` runs clippy `-D warnings` and the tests. The crate is
   not rustfmt-clean; format only the files a change touches (`rustfmt --edition 2021 <file>`).
-  Contract-level verification (`make test`, Kani, testnet smoke) lives in the repository
+  Contract-level verification (`just test`, Kani, testnet smoke) lives in the repository
   README — abtest itself *is* the differential rung.
 - The runtime QA artifact is `report.md`: verdict + ADR invariant ledger. The TUI's
   Invariants tab recomputes the same ledger rows live, so a failing run is visible mid-run.

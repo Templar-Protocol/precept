@@ -36,7 +36,7 @@ repaired. Installation is explicit; verification does not install missing tools.
 
 ## Execution and verdicts
 
-Run `make verify-local` from the repository root after the shared prerequisites
+Run `just verify-local` from the repository root after the shared prerequisites
 are satisfied. [`scripts/verify_verus.py`](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/scripts/verify_verus.py) selects
 [`supply_delta.rs`](https://github.com/Templar-Protocol/precept/blob/62c8e9bee072d5e58494c0f7a7bf777926e7ea2b/verification/verus/supply_delta.rs), enables `--no-cheating`,
 uses one verifier thread and checks the structured JSON result against the exact

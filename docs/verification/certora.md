@@ -45,7 +45,7 @@ python3 scripts/verify_local.py --seconds 900 -- env CARGO_BUILD_JOBS=1 \
   just --justfile pool/justfile build
 ```
 
-Do not substitute `make build` for the instrumented build: the Make recipes do
+Do not substitute `just build` for the instrumented build: the root justfile recipes do
 not enable `certora`. Both use the checked `release` profile, not the separately
 defined `release-soroban` profile.
 
@@ -53,7 +53,7 @@ defined `release-soroban` profile.
 
 **Requires explicit authorization for the selected rules and hosted cost.**
 Sunbeam execution requires a Certora account, a billable hosted service and
-`CERTORAKEY`; it is not part of `make verify-local` or the repository CI gate.
+`CERTORAKEY`; it is not part of `just verify-local` or the repository CI gate.
 Building locally or editing documentation does not authorize a submission.
 
 In an isolated Python environment, install the CLI version used for the archived

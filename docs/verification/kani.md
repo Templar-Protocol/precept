@@ -24,7 +24,7 @@ Run from the repository root after the [shared Wasm preparation](https://github.
 Kani: the `sccache` compiler probe is incompatible with `kani-compiler`.
 
 ```sh
-make verify-local-codegen
+just verify-local-codegen
 python3 scripts/verify_local.py --seconds 900 -- env RUSTC_WRAPPER= \
   cargo kani -p pool --lib list --format json
 python3 scripts/verify_local.py --seconds 900 -- env RUSTC_WRAPPER= \
@@ -116,13 +116,14 @@ For an authorized future publication, supply a proof package containing `kani.py
 `integrated-execution-receipt.json`, plus the run directory and referenced logs:
 
 ```sh
-make kani-release KANI_RELEASE_DRY_RUN=1 \
+just KANI_RELEASE_DRY_RUN=1 \
   KANI_RELEASE_COMMIT="$(git rev-parse HEAD)" \
   KANI_RELEASE_PACKAGE_DIR=/path/to/proof-packaging \
-  KANI_RELEASE_RUN_DIR=/path/to/integrated-run
+  KANI_RELEASE_RUN_DIR=/path/to/integrated-run \
+  kani-release
 ```
 
-The target runs publisher tests, reconciles selectors/verdicts/covers/source maps,
+The recipe runs publisher tests, reconciles selectors/verdicts/covers/source maps,
 rejects unsafe input ownership, permissions and file types, and verifies a
 local archive readback. Only remove `KANI_RELEASE_DRY_RUN` when publication is
 authorized: that creates a tag and GitHub release and verifies downloaded assets.

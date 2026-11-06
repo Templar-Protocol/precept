@@ -14,7 +14,7 @@ let
     rustc = toolchain;
   };
 
-  # `make build` and `make differential` need `stellar contract optimize`, which
+  # `just build` and `just differential` need `stellar contract optimize`, which
   # refuses to run unless the CLI was built with `additional-libs` (it is what
   # pulls in wasm-opt). stellar-cli is not packaged in nixpkgs; build the pinned
   # release from crates.io.
@@ -47,7 +47,9 @@ let
   };
 in
 {
-  packages = [ stellar-cli ];
+  # just runs the root justfile. gnumake only builds the pinned stock baseline
+  # inside `just differential`, using that baseline's own upstream Makefile.
+  packages = [ stellar-cli pkgs.just pkgs.gnumake ];
 
   # tools/abtest's justfile and market commands take the CLI by exact path.
   env.PRECEPT_STELLAR_BIN = lib.getExe stellar-cli;

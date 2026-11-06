@@ -47,7 +47,11 @@ jobs:
       - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
         with:
           version: ${{ env.STELLAR_CLI }}
-      - run: make build
+      - uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46
+        with:
+          tool: just
+      # Tags cut before the justfile migration (v0.1.0, v0.1.1) still build with their Makefile.
+      - run: if [[ -f justfile ]]; then just build; else make build; fi
       - run: |
           mkdir out
           cp "$WASM_DIR"/{pool,backstop,pool_factory}.wasm out/

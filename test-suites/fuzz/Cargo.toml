@@ -30,7 +30,7 @@ members = ["."]
 
 [profile.release]
 debug = 1
-# Keep native release replay checked like `make build`, independently of the
+# Keep native release replay checked like `just build`, independently of the
 # flags cargo-fuzz supplies for mutation builds.
 overflow-checks = true
 

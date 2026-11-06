@@ -40,7 +40,7 @@ def sources():
              *ROOT.glob('mocks/*/Cargo.toml')}
     for directory in ('pool/src', 'shared', 'mocks/moderc3156-iface'):
         paths.update((ROOT / directory).rglob('*.rs'))
-    paths.update(ROOT / name for name in ('Cargo.lock', 'Makefile', 'rust-toolchain.toml'))
+    paths.update(ROOT / name for name in ('Cargo.lock', 'justfile', 'rust-toolchain.toml'))
     return {str(p.relative_to(ROOT)): digest(p) for p in sorted(paths) if p.is_file()}
 
 

@@ -113,7 +113,7 @@ what makes each claim checkable.
 | Kani (bounded model checking) | Historical full inventory: 110 proof harnesses plus 1,678 generated fixed-parameter instances; [campaign `753b1ae`](https://github.com/Templar-Protocol/blend-contracts-v2/releases/tag/kani-run-753b1ae-2026-09-15) passed 3,197/3,197 obligations at that source commit, not the latest checkout. The Kani 0.68.0 property-mapped rerun at `886e26f` recorded 35 SUCCESSFUL, 2 budget-limited and 0 counterexamples; the separate supply/withdrawal solvency pair also passed. |
 | Certora Sunbeam | Archived auditor-rule-set reproduction: 24 SUCCESS, 2 UNKNOWN, **0 VIOLATED**. Fork-specific additions: oracle circuit breaker 13/13, utilization guards/witnesses 9/10. Raw verdicts and source provenance are indexed in [`verification/certora/README.md`](verification/certora/README.md). |
 | Fuzzing | Mutation fuzzing and deterministic committed-seed replay share the full pool-fixture execution path. When totals fit i128, floor-rounded price valuations of `(supplier claims + credit)` must strictly exceed ceil-rounded price valuations of debt. Exact arithmetic preflight identifies numeric range exclusions; unexpected valuation failures are not skipped. This is not a cash-aware solvency proof. |
-| Local strengthening | `make verify-local` passed five Kani harnesses with all 21 required covers, plus nine Verus proof functions: three unbounded-integer supply/withdrawal theorems, four helpers and two witnesses. The local set includes the repaired zero-debt proof, checked contract consumption, and the production first-read price guard and decimals validation/cache/reset under modeled host interfaces. The ceil-mint negative control detected both intended failures. |
+| Local strengthening | The local gate (`just verify-local`, run at the time as the identical `make verify-local` recipe) passed five Kani harnesses with all 21 required covers, plus nine Verus proof functions: three unbounded-integer supply/withdrawal theorems, four helpers and two witnesses. The local set includes the repaired zero-debt proof, checked contract consumption, and the production first-read price guard and decimals validation/cache/reset under modeled host interfaces. The ceil-mint negative control detected both intended failures. |
 | Production arithmetic extraction | Charon/Aeneas extracted and translated the actual reserve conversions, dispatch and checked-i128/I256 branches: 23 transparent functions and 22 opaque functions. SDK/arithmetic refinement and Lean theorem checking remain open; translation is not a theorem verdict. |
 | Third-party audit | See [`audits/`](audits/). Formal verification complements an audit; it does not replace one. |
 
@@ -210,9 +210,9 @@ Linux, Python 3.11+, a user systemd manager and working cgroup-v2 limits are req
 From the repository root, prepare Wasm imports once or after their inputs change:
 
 ```sh
-python3 scripts/verify_local.py --seconds 900 -- env CARGO_BUILD_JOBS=1 make build
-make verify-local-codegen
-make verify-local
+python3 scripts/verify_local.py --seconds 900 -- env CARGO_BUILD_JOBS=1 just build
+just verify-local-codegen
+just verify-local
 ```
 
 The gate runs regression tests, the exact local Kani inventory and the Verus
@@ -229,15 +229,15 @@ Fuzz regressions use the pinned [fuzz toolchain](test-suites/fuzz/rust-toolchain
 (lint uses the root toolchain) and the same Wasm imports:
 
 ```sh
-python3 scripts/verify_local.py --seconds 1800 -- make fuzz-lint
-python3 scripts/verify_local.py --seconds 1800 -- make fuzz-test
-python3 scripts/verify_local.py --seconds 1800 -- make fuzz-replay
-python3 scripts/verify_local.py --seconds 1800 -- make fuzz-build
+python3 scripts/verify_local.py --seconds 1800 -- just fuzz-lint
+python3 scripts/verify_local.py --seconds 1800 -- just fuzz-test
+python3 scripts/verify_local.py --seconds 1800 -- just fuzz-replay
+python3 scripts/verify_local.py --seconds 1800 -- just fuzz-build
 ```
 
 Replay reads [reviewed JSON seeds](test-suites/fuzz/regression-seeds), checks
 acceptance, persisted positions and selected wallet deltas, and rejects
-unevaluable checks. Direct `make fuzz-replay` emits JSON Lines on stdout;
+unevaluable checks. Direct `just fuzz-replay` emits JSON Lines on stdout;
 the containment wrapper captures stdout/stderr in its reported log.
 
 The tool guides describe other Kani selections and authorized Certora operation.
