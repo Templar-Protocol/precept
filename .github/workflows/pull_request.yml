@@ -1,12 +1,29 @@
 name: pull_request
 
+# Documentation-only changes skip this workflow (build, tests, Kani, Verus,
+# fuzz). A change runs it unless every touched file matches paths-ignore;
+# no build or test reads these paths. docs/ has its own gate in docs.yml.
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '**.md'
+      - docs/**
+      - docs-library
+      - audits/**
+      - .gitbook.yaml
+      - LICENSE
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - '**.md'
+      - docs/**
+      - docs-library
+      - audits/**
+      - .gitbook.yaml
+      - LICENSE
 
 # No job here writes to the repository: they check formatting, build, test, run
 # provers and replay/build the fuzz target. Without this, GITHUB_TOKEN takes the
