@@ -109,8 +109,10 @@ There are two documentation sets, and a change that affects users can need both.
 | Set | Path | Audience |
 | --- | --- | --- |
 | Repo docs | `docs/` (GitBook, gated by `scripts/check_docs.py`; the import uses `force: true`, so edit only by PR) | Auditors, integrators, maintainers: mechanism, code permalinks, admin levers, runbooks |
-| Public docs | `docs-library/` → `Templar-Protocol/precept-docs` (HonKit on Vercel) | Lenders, borrowers, market creators, developers |
+| Public docs | `docs-library/` → `Templar-Protocol/precept-docs` (private repo; HonKit on Vercel, published at https://docs.precept.templarfi.org/) | Lenders, borrowers, market creators, developers |
 
-- A change to contract behaviour, parameters, admin or governance levers, risks or the release process updates `docs/` in the same PR. If the change is visible to users, also update the public docs: run `git submodule update --init docs-library`, commit in precept-docs first, then bump the submodule pointer here.
+**Public docs policy.** The site is public; its source repo is private. Change it only by a pull request on `Templar-Protocol/precept-docs`. Never edit, commit or push inside `docs-library/` from this repo, and never change the site any other way: merging to precept-docs `main` publishes to https://docs.precept.templarfi.org/.
+
+- A change to contract behaviour, parameters, admin or governance levers, risks or the release process updates `docs/` in the same PR. If the change is visible to users, also open a PR on precept-docs and link the two PRs. After the precept-docs PR merges, bump the `docs-library` pointer here (`git submodule update --init docs-library`, check out the merged commit) so the pair records which docs match which code.
 - Ground every claim in code at a cited commit or in live pool state. Keep one source per fact: public pages link to `docs/` for depth instead of copying it.
 - Public pages follow `docs-library/CONTRIBUTING.md`: say "market", not "pool"; no em dashes; pinned code links only on `developers/code-references.md`; name Blend only on `developers/code-lineage.md`. Run `npm run check && npm run build` there.
