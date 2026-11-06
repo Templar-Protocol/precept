@@ -13,8 +13,12 @@
 //! - Only the configured `caller` (the Hypernative-held key) can call `trip`.
 //! - The only thing it can do is trip an asset. Untripping and every other
 //!   governance action stay with the governance Admin / ManualTripper humans.
-//! - There is no admin, setter or upgrade path. Rotation means redeploying
-//!   this contract and re-granting the role.
+//! - The `owner` (OpenZeppelin `Ownable`, two-step transfer) can rotate the
+//!   `caller` with `set_caller`; nothing else. It cannot trip, untrip, change
+//!   the governance address or upgrade. On mainnet it is the governance
+//!   Admin's 2-of-3 smart account, so rotating the key is one signing round
+//!   and the role grant stays on this contract. Renouncing ownership freezes
+//!   the caller for good.
 //! - Governance must grant the `ManualTripper` role to THIS contract's
 //!   address (`SetRole(tripper, ManualTripper, true)`): the contract passes
 //!   its own address as the governance `caller`, so Soroban authorizes the
@@ -30,6 +34,8 @@
 //!   today).
 //! - Pinned to `rev eea0060d (governance v0.1.5, runtime v0.1.4)`.
 use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env};
+use stellar_access::ownable::{set_owner, Ownable};
+use stellar_macros::only_owner;
 use templar_proxy_oracle_soroban_common::{Asset, DEFAULT_TTL_EXTEND_TO, DEFAULT_TTL_THRESHOLD};
 use templar_proxy_oracle_soroban_governance_common::{GovernanceAction, GovernanceError, Proposal};
 
@@ -62,11 +68,12 @@ pub struct OracleTripper;
 
 #[contractimpl]
 impl OracleTripper {
-    pub fn __constructor(env: Env, governance: Address, caller: Address) {
+    pub fn __constructor(env: Env, governance: Address, caller: Address, owner: Address) {
         env.storage()
             .instance()
             .set(&DataKey::Governance, &governance);
         env.storage().instance().set(&DataKey::Caller, &caller);
+        set_owner(&env, &owner);
         extend_self(&env);
         // Fail fast if `governance` is not a governance contract.
         GovernanceClient::new(&env, &governance).next_proposal_id();
@@ -103,12 +110,25 @@ impl OracleTripper {
         stored_caller(&env)
     }
 
+    /// Owner-only: replaces the key allowed to call `trip`. The old key loses
+    /// the power in the same call; the governance role stays on this contract.
+    #[only_owner]
+    pub fn set_caller(env: Env, caller: Address) {
+        extend_self(&env);
+        env.storage().instance().set(&DataKey::Caller, &caller);
+    }
+
     /// Permissionless: renews this contract's instance AND code (keeper
     /// batcher `extend_ttl_contracts` convention).
     pub fn extend_ttl(env: Env) {
         extend_self(&env);
     }
 }
+
+/// OpenZeppelin two-step `transfer_ownership` / `accept_ownership`,
+/// `renounce_ownership` and `get_owner`.
+#[contractimpl(contracttrait)]
+impl Ownable for OracleTripper {}
 
 fn extend_self(env: &Env) {
     env.deployer().extend_ttl(

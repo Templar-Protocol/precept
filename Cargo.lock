@@ -1277,6 +1277,8 @@ name = "oracle-tripper"
 version = "0.1.0"
 dependencies = [
  "soroban-sdk",
+ "stellar-access",
+ "stellar-macros",
  "templar-proxy-oracle-soroban-common 0.1.4",
  "templar-proxy-oracle-soroban-contract 0.1.4",
  "templar-proxy-oracle-soroban-governance-common",

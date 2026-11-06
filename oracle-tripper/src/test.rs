@@ -75,6 +75,8 @@ struct Setup {
     admin: Address,
     /// The stored Hypernative caller.
     caller: Address,
+    /// The tripper's OpenZeppelin owner (mainnet: the Admin smart account).
+    owner: Address,
     asset: Address,
     runtime_id: Address,
     governance_id: Address,
@@ -120,6 +122,7 @@ impl Setup {
 
         let admin = Address::generate(&env);
         let caller = Address::generate(&env);
+        let owner = Address::generate(&env);
         let asset = Address::generate(&env);
         let base_usd = Asset::Other(Symbol::new(&env, "USD"));
 
@@ -130,12 +133,13 @@ impl Setup {
         runtime.transfer_ownership(&governance_id, &live_until_ledger);
         runtime.accept_ownership();
 
-        let tripper_id = env.register(OracleTripper, (&governance_id, &caller));
+        let tripper_id = env.register(OracleTripper, (&governance_id, &caller, &owner));
 
         let s = Self {
             env,
             admin,
             caller,
+            owner,
             asset,
             runtime_id,
             governance_id,
@@ -226,6 +230,19 @@ impl Setup {
                 contract: &self.tripper_id,
                 fn_name: "trip",
                 args: (asset.clone(),).into_val(&self.env),
+                sub_invokes: &[],
+            },
+        }]);
+    }
+
+    /// Like `mock_trip`, for `set_caller(new)` signed by `who`.
+    fn mock_set_caller(&self, who: &Address, new: &Address) {
+        self.env.mock_auths(&[MockAuth {
+            address: who,
+            invoke: &MockAuthInvoke {
+                contract: &self.tripper_id,
+                fn_name: "set_caller",
+                args: (new.clone(),).into_val(&self.env),
                 sub_invokes: &[],
             },
         }]);
@@ -466,12 +483,48 @@ fn constructor_rejects_a_non_governance_address() {
     let env = Env::default();
     let not_governance = Address::generate(&env);
     let caller = Address::generate(&env);
-    env.register(OracleTripper, (&not_governance, &caller));
+    let owner = Address::generate(&env);
+    env.register(OracleTripper, (&not_governance, &caller, &owner));
 }
 
 #[test]
 fn getters_return_constructor_values() {
     let s = Setup::new(true);
     assert_eq!(s.tripper().governance(), s.governance_id);
+    assert_eq!(s.tripper().caller(), s.caller);
+    assert_eq!(s.tripper().get_owner(), Some(s.owner.clone()));
+}
+
+#[test]
+fn owner_rotates_the_caller_without_a_new_role_grant() {
+    let s = Setup::new(true);
+    let new_caller = Address::generate(&s.env);
+
+    s.mock_set_caller(&s.owner, &new_caller);
+    s.tripper().set_caller(&new_caller);
+    assert_eq!(s.tripper().caller(), new_caller);
+
+    // The old key lost the power in the same call.
+    s.mock_trip(&s.caller);
+    assert_eq!(s.tripper().try_trip(&s.asset), Err(Ok(auth_err())));
+    assert!(!s.is_tripped());
+
+    // The new key trips through the role the contract already holds.
+    s.mock_trip(&new_caller);
+    s.tripper().trip(&s.asset);
+    assert!(s.is_tripped());
+}
+
+#[test]
+fn only_the_owner_can_set_the_caller() {
+    let s = Setup::new(true);
+    let new_caller = Address::generate(&s.env);
+    let stranger = Address::generate(&s.env);
+
+    // Neither the current caller, the governance admin nor a stranger.
+    for who in [&s.caller, &s.admin, &stranger] {
+        s.mock_set_caller(who, &new_caller);
+        assert_eq!(s.tripper().try_set_caller(&new_caller), Err(Ok(auth_err())));
+    }
     assert_eq!(s.tripper().caller(), s.caller);
 }

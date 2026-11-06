@@ -12,6 +12,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+# Same OpenZeppelin release the pinned governance/runtime use (already in the lock).
+stellar-access = "0.7.1"
+stellar-macros = "0.7.1"
 templar-proxy-oracle-soroban-common = { git = "https://github.com/Templar-Protocol/contracts", rev = "eea0060d4eda3459599031722d88201fb1139d6a" }
 templar-proxy-oracle-soroban-governance-common = { git = "https://github.com/Templar-Protocol/contracts", rev = "eea0060d4eda3459599031722d88201fb1139d6a" }
 

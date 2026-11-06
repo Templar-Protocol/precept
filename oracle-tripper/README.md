@@ -13,10 +13,12 @@ Pinned to `rev eea0060d (governance v0.1.5, runtime v0.1.4)`. Only
 ## ABI
 
 ```text
-__constructor(env, governance: Address, caller: Address)   // fails if `governance` has no next_proposal_id()
+__constructor(env, governance: Address, caller: Address, owner: Address)   // fails if `governance` has no next_proposal_id()
 trip(env, asset: Address) -> u64      // trips Asset::Stellar(asset); only `caller`; returns the proposal id
 governance(env) -> Address
 caller(env) -> Address
+set_caller(env, caller: Address)      // only `owner`; rotates the Hypernative key
+get_owner / transfer_ownership / accept_ownership / renounce_ownership   // OpenZeppelin Ownable, two-step
 extend_ttl(env)                       // permissionless; renews instance and code
 ```
 
@@ -25,8 +27,10 @@ extend_ttl(env)                       // permissionless; renews instance and cod
 The runtime stops serving a price for that asset (cached reads and refreshes
 are blocked). Every pool whose adapter prices that asset through this runtime
 is affected: pools don't change status; their price-dependent operations fail
-until the asset is untripped. USDC is a reserve of both Templar mainnet
-pools, so tripping USDC affects both.
+until the asset is untripped. That includes borrows, collateral withdrawals by
+accounts with debt, and **liquidations**; suppliers without debt can still
+withdraw. USDC is a reserve of both Templar mainnet pools, so tripping USDC
+affects both. The mainnet assets are USDC, XLM and deJAAA.
 
 ## Deploy
 
@@ -35,7 +39,8 @@ stellar contract deploy \
   --wasm target/wasm32v1-none/optimized/oracle_tripper.wasm \
   --network <NETWORK> \
   -- --governance <GOVERNANCE_CONTRACT_ID> \
-     --caller <HYPERNATIVE_SYSTEM_ASSET_ADDRESS>
+     --caller <HYPERNATIVE_SYSTEM_ASSET_ADDRESS> \
+     --owner <GOVERNANCE_ADMIN_SMART_ACCOUNT>
 ```
 
 ## Grant the role
@@ -46,7 +51,7 @@ the **tripper contract address** (not the Hypernative key) via a
 
 ## Verify before relying on it
 
-- `governance()` and `caller()` return the intended addresses.
+- `governance()`, `caller()` and `get_owner()` return the intended addresses.
 - Governance `has_role(<tripper>, ManualTripper) == true`.
 - Governance `get_operation_ttl(SetManualTrip) == 0`.
 - A simulate-only `trip` (`--send no`) from the Hypernative key succeeds. This
@@ -93,9 +98,14 @@ flow:
 
 ## Rotation
 
-No admin, setters or upgrade path. Revoke the old tripper first
-(`SetRole(<old tripper>, ManualTripper, false)`), then deploy the new one and
-grant it the role.
+The owner calls `set_caller(<new key>)`. The old key loses the power in the
+same call; the governance role stays on the tripper, so no redeploy and no
+`SetRole`. On mainnet the owner is the Admin smart account, so this is one
+2-of-3 signing round. `transfer_ownership` / `accept_ownership` move the owner
+in two steps; `renounce_ownership` freezes the caller for good.
+
+A full replacement (new tripper) still means revoking the old one first
+(`SetRole(<old tripper>, ManualTripper, false)`), then deploying and granting.
 
 ## Keep alive
 
