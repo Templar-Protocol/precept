@@ -20,13 +20,19 @@ use templar_proxy_oracle_soroban_governance_contract::{
     ProxyOracleGovernance, ProxyOracleGovernanceClient,
 };
 
-use crate::{OracleTripper, OracleTripperClient};
+use crate::{OracleTripper, OracleTripperClient, TripperError};
 
 /// A failure raised by a governance contract call made from inside `trip`.
 /// The tripper uses the non-try governance client, so the sub-contract error
 /// aborts the whole invocation and surfaces unchanged as the host error.
 fn gov_err(e: GovernanceError) -> Error {
     Error::from_contract_error(e as u32)
+}
+
+/// The tripper's own refusal of a second `trip` on a spent asset. Raised in
+/// the tripper itself, so it surfaces directly as a contract error.
+fn spent_err() -> Error {
+    Error::from_contract_error(TripperError::Spent as u32)
 }
 
 /// Host error for a missing `require_auth` authorization. The host raises it
@@ -65,7 +71,7 @@ enum RoleHolder {
     Nobody,
     /// The tripper contract address (the intended deployment).
     Tripper,
-    /// The Hypernative caller key (wrong: governance sees the tripper as the
+    /// The caller key (wrong: governance sees the tripper as the
     /// governance caller, not this key).
     Caller,
 }
@@ -73,7 +79,7 @@ enum RoleHolder {
 struct Setup {
     env: Env,
     admin: Address,
-    /// The stored Hypernative caller.
+    /// The stored caller key (our Secret-Manager key, submitted by the sink).
     caller: Address,
     /// The tripper's OpenZeppelin owner (mainnet: the Admin smart account).
     owner: Address,
@@ -248,6 +254,19 @@ impl Setup {
         }]);
     }
 
+    /// Like `mock_trip`, for `rearm(asset)` signed by `who`.
+    fn mock_rearm(&self, who: &Address, asset: &Address) {
+        self.env.mock_auths(&[MockAuth {
+            address: who,
+            invoke: &MockAuthInvoke {
+                contract: &self.tripper_id,
+                fn_name: "rearm",
+                args: (asset.clone(),).into_val(&self.env),
+                sub_invokes: &[],
+            },
+        }]);
+    }
+
     fn is_tripped(&self) -> bool {
         self.runtime()
             .get_breaker_set_view(&self.stellar())
@@ -346,7 +365,7 @@ fn trip_fails_without_manual_tripper_role() {
 #[test]
 fn trip_fails_when_role_granted_to_the_caller_key() {
     // The role must sit on the tripper contract: governance authorizes the
-    // address that calls it, which is the tripper, not the Hypernative key.
+    // address that calls it, which is the tripper, not the caller key.
     let s = Setup::with_role(RoleHolder::Caller);
     let id_before = s.governance().next_proposal_id();
 
@@ -409,22 +428,87 @@ fn trip_fails_for_unconfigured_asset() {
 }
 
 #[test]
-fn tripping_an_already_tripped_asset_succeeds_with_a_new_id() {
-    // Proven: a second `trip` on a tripped asset returns Ok with a fresh,
-    // consecutive proposal id, leaves nothing active, and the asset stays
-    // tripped.
+fn second_trip_of_same_asset_is_refused_until_rearm() {
+    // The one-shot budget: a second `trip` on the same asset is refused with
+    // `TripperError::Spent` and touches no governance state; the owner's
+    // `rearm` restores it and the next trip gets a fresh, consecutive id.
     let s = Setup::new(true);
+    assert!(s.tripper().is_armed(&s.asset));
 
     s.mock_trip(&s.caller);
     let first = s.tripper().trip(&s.asset);
     assert!(s.is_tripped());
+    assert!(!s.tripper().is_armed(&s.asset));
+    let id_after_first = s.governance().next_proposal_id();
+
+    s.mock_trip(&s.caller);
+    assert_eq!(s.tripper().try_trip(&s.asset), Err(Ok(spent_err())));
+    assert_eq!(s.governance().next_proposal_id(), id_after_first);
+    assert!(s.governance().active_ids().is_empty());
+    assert!(s.is_tripped());
+
+    s.mock_rearm(&s.owner, &s.asset);
+    s.tripper().rearm(&s.asset);
+    assert!(s.tripper().is_armed(&s.asset));
 
     s.mock_trip(&s.caller);
     let second = s.tripper().trip(&s.asset);
-
     assert_eq!(second, first + 1);
     assert!(s.is_tripped());
     assert_eq!(s.governance().next_proposal_id(), second + 1);
+    assert!(s.governance().active_ids().is_empty());
+}
+
+#[test]
+fn budget_is_per_asset() {
+    // Spending one asset's budget leaves every other asset armed.
+    let s = Setup::new(true);
+    let other = Address::generate(&s.env);
+    let other_stellar = Asset::Stellar(other.clone());
+    let mut sources = Vec::new(&s.env);
+    sources.push_back(SourceConfig {
+        oracle: s.env.register(FakeFeed, ()),
+        asset: other_stellar.clone(),
+    });
+    s.admin_execute(GovernanceAction::SetProxy(
+        other_stellar,
+        ProxyConfig {
+            sources,
+            min_sources: 1,
+            max_age_secs: Some(300),
+            max_clock_drift_secs: Some(60),
+        },
+    ));
+
+    s.mock_trip(&s.caller);
+    s.tripper().trip(&s.asset);
+    assert!(!s.tripper().is_armed(&s.asset));
+    assert!(s.tripper().is_armed(&other));
+
+    s.mock_trip_asset(&s.caller, &other);
+    let id = s.tripper().trip(&other);
+    assert!(!s.tripper().is_armed(&other));
+    assert_eq!(s.governance().next_proposal_id(), id + 1);
+}
+
+#[test]
+fn a_failed_governance_call_does_not_spend_the_budget() {
+    // The spent mark is written before the governance calls, so a rejected
+    // trip must revert it with the rest of the invocation: without the
+    // ManualTripper role the trip fails (as `trip_fails_without_manual_tripper_role`
+    // does) and the asset is still armed to trip later.
+    let s = Setup::with_role(RoleHolder::Nobody);
+    let id_before = s.governance().next_proposal_id();
+
+    s.mock_trip(&s.caller);
+    assert_eq!(
+        s.tripper().try_trip(&s.asset),
+        Err(Ok(gov_err(GovernanceError::Unauthorized)))
+    );
+
+    assert!(!s.is_tripped());
+    assert!(s.tripper().is_armed(&s.asset));
+    assert_eq!(s.governance().next_proposal_id(), id_before);
     assert!(s.governance().active_ids().is_empty());
 }
 
@@ -527,4 +611,19 @@ fn only_the_owner_can_set_the_caller() {
         assert_eq!(s.tripper().try_set_caller(&new_caller), Err(Ok(auth_err())));
     }
     assert_eq!(s.tripper().caller(), s.caller);
+}
+
+#[test]
+fn only_the_owner_can_rearm() {
+    let s = Setup::new(true);
+    let stranger = Address::generate(&s.env);
+    s.mock_trip(&s.caller);
+    s.tripper().trip(&s.asset);
+
+    // Neither the current caller, the governance admin nor a stranger.
+    for who in [&s.caller, &s.admin, &stranger] {
+        s.mock_rearm(who, &s.asset);
+        assert_eq!(s.tripper().try_rearm(&s.asset), Err(Ok(auth_err())));
+    }
+    assert!(!s.tripper().is_armed(&s.asset));
 }
