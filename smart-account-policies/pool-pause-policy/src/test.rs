@@ -4,7 +4,13 @@
 //!
 //! The fixtures are the real authorization stack: `__check_auth` runs from the
 //! fetched account wasm, the threshold check from the fetched policy wasm, and
-//! only the policy under test is compiled from this crate's source.
+//! rules are created and read back through the fetched account wasm's own
+//! `add_context_rule` / `get_context_rule` / `get_context_rules_count`
+//! entrypoints (under `mock_all_auths`, for setup only: [`Fixture::arm`] switches
+//! the host back to enforcing real authorization entries). Compiled from this
+//! crate's source are the policy under test and the `FakePool`, `WidePool` and
+//! `Delegated` stand-ins; the `stellar-accounts` types only encode arguments
+//! and decode results.
 //!
 //! Fixture shape (mirrors the precept admin account):
 //! - rule 0 — `Default`, three approver contracts, `simple_threshold` with
@@ -35,7 +41,6 @@ use soroban_sdk::{
     events::Event as _,
     testutils::{
         storage::Persistent as _, // for `get_ttl` on persistent storage
-        ContractEvents,
         Events,
         Ledger,
         Logs,
@@ -45,15 +50,14 @@ use soroban_sdk::{
         Limits, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
         SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, VecM, WriteXdr,
     },
-    Address, Bytes, BytesN, Env, IntoVal, Map, String, TryFromVal, Val, Vec,
+    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use stellar_accounts::{
     policies::simple_threshold::SimpleThresholdAccountParams,
     smart_account::{
-        add_context_rule, get_context_rule, get_context_rules_count, AuthDigestPreimage,
-        AuthPayload, ContextRule, ContextRuleAdded, ContextRuleType, Signer, SmartAccountError,
-        SmartAccountStorageKey,
+        AuthDigestPreimage, AuthPayload, ContextRule, ContextRuleAdded, ContextRuleType, Signer,
+        SmartAccountError, SmartAccountStorageKey,
     },
 };
 
@@ -134,6 +138,32 @@ impl FakePool {
     }
 }
 
+/// A pool whose `set_status` takes a second argument. The policy pins the
+/// function name *and* the argument count, so a call only reaches the count
+/// check if it is to something named `set_status`: a differently named
+/// two-argument function is refused on its name alone. A contract function has
+/// a fixed arity, which is why this is a second contract and not another
+/// `FakePool` method.
+#[contract]
+struct WidePool;
+
+#[contractimpl]
+impl WidePool {
+    pub fn __constructor(e: Env, admin: Address) {
+        e.storage().persistent().set(&ADMIN_KEY, &admin);
+    }
+
+    pub fn set_status(e: Env, status: u32, _extra: u32) {
+        let admin: Address = e.storage().persistent().get(&ADMIN_KEY).unwrap();
+        admin.require_auth();
+        e.storage().persistent().set(&STATUS_KEY, &status);
+    }
+
+    pub fn get_status(e: Env) -> u32 {
+        e.storage().persistent().get(&STATUS_KEY).unwrap_or(0)
+    }
+}
+
 /// Stand-in for a delegated signer, modeled on OpenZeppelin's
 /// `ApprovingAccount` test helper: anything asked of it is approved. Signers
 /// are identified by address, so each one is registered separately.
@@ -183,11 +213,6 @@ struct Fixture {
     threshold_policy: Address,
     pause_policy: Address,
     nonce: Cell<i64>,
-    /// The contract events published by the most recent [`Fixture::add_rule`].
-    /// `e.events().all()` only ever returns the last contract invocation's
-    /// events, so they have to be captured inside the `as_contract` frame
-    /// that publishes them, before any later call overwrites the snapshot.
-    rule_events: RefCell<Option<ContractEvents>>,
 }
 
 impl Fixture {
@@ -248,7 +273,6 @@ impl Fixture {
             threshold_policy,
             pause_policy,
             nonce: Cell::new(1_000),
-            rule_events: RefCell::new(None),
         }
     }
 
@@ -259,6 +283,20 @@ impl Fixture {
             ContextRuleType::CallContract(self.pool.clone()),
             "pause-xlm-usdc",
             Some(VALID_UNTIL),
+            true,
+        )
+    }
+
+    /// The pause policy alone, without `simple_threshold`. The account leaves
+    /// all signer validation to a rule's policies, so with no threshold policy
+    /// this policy's own `authenticated_signers` check is the only thing that
+    /// can refuse an unsigned call.
+    fn add_pause_only_rule(&self) -> ContextRule {
+        self.add_rule(
+            ContextRuleType::CallContract(self.pool.clone()),
+            "pause-only",
+            Some(VALID_UNTIL),
+            false,
         )
     }
 
@@ -266,34 +304,42 @@ impl Fixture {
     /// The name stays within `MAX_NAME_SIZE` (20 bytes) or `add_context_rule`
     /// refuses with `#3015` before the rule exists.
     fn add_default_pause_rule(&self) -> ContextRule {
-        self.add_rule(ContextRuleType::Default, "default-pause", None)
+        self.add_rule(ContextRuleType::Default, "default-pause", None, true)
     }
 
+    /// Creates a rule through the fetched account wasm's `add_context_rule`
+    /// entrypoint, the call the mainnet packet makes. `mock_all_auths` stands
+    /// in for the 2-of-3 signatures; it stays in force until the next
+    /// [`Fixture::arm`].
     fn add_rule(
         &self,
         context_type: ContextRuleType,
         name: &str,
         valid_until: Option<u32>,
+        with_threshold: bool,
     ) -> ContextRule {
         let e = &self.e;
         let mut policies: Map<Address, Val> = Map::new(e);
-        policies.set(
-            self.threshold_policy.clone(),
-            SimpleThresholdAccountParams { threshold: 1 }.into_val(e),
-        );
-        policies.set(self.pause_policy.clone(), ().into_val(e));
-        e.as_contract(&self.account, || {
-            let rule = add_context_rule(
-                e,
-                &context_type,
-                &String::from_str(e, name),
-                valid_until,
-                &Vec::from_iter(e, [Signer::Delegated(self.pauser.clone())]),
-                &policies,
+        if with_threshold {
+            policies.set(
+                self.threshold_policy.clone(),
+                SimpleThresholdAccountParams { threshold: 1 }.into_val(e),
             );
-            *self.rule_events.borrow_mut() = Some(e.events().all());
-            rule
-        })
+        }
+        policies.set(self.pause_policy.clone(), ().into_val(e));
+        e.mock_all_auths();
+        e.invoke_contract::<ContextRule>(
+            &self.account,
+            &Symbol::new(e, "add_context_rule"),
+            soroban_sdk::vec![
+                e,
+                context_type.into_val(e),
+                String::from_str(e, name).into_val(e),
+                valid_until.into_val(e),
+                Vec::from_iter(e, [Signer::Delegated(self.pauser.clone())]).into_val(e),
+                policies.into_val(e),
+            ],
+        )
     }
 
     fn pauser_signer(&self) -> Signer {
@@ -311,14 +357,24 @@ impl Fixture {
         Signer::Delegated(self.e.register(Delegated, ()))
     }
 
+    /// `get_context_rule` on the fetched account wasm.
     fn rule(&self, id: u32) -> ContextRule {
         let e = &self.e;
-        e.as_contract(&self.account, || get_context_rule(e, id))
+        e.invoke_contract::<ContextRule>(
+            &self.account,
+            &Symbol::new(e, "get_context_rule"),
+            soroban_sdk::vec![e, id.into_val(e)],
+        )
     }
 
+    /// `get_context_rules_count` on the fetched account wasm.
     fn rule_count(&self) -> u32 {
         let e = &self.e;
-        e.as_contract(&self.account, || get_context_rules_count(e))
+        e.invoke_contract::<u32>(
+            &self.account,
+            &Symbol::new(e, "get_context_rules_count"),
+            soroban_sdk::vec![e],
+        )
     }
 
     /// Writes a status without going through authorization.
@@ -333,7 +389,7 @@ impl Fixture {
 
     /// `pool::set_status(status)`, expecting the host to accept it.
     fn set_status(&self, pool: &Address, status: u32, rule_ids: &[u32], signers: &[&Signer]) {
-        self.arm(pool, "set_status", status, rule_ids, signers);
+        self.arm(pool, "set_status", &[status], rule_ids, signers);
         FakePoolClient::new(&self.e, pool).set_status(&status);
     }
 
@@ -346,7 +402,7 @@ impl Fixture {
         rule_ids: &[u32],
         signers: &[&Signer],
     ) -> std::string::String {
-        self.try_call(pool, "set_status", status, rule_ids, signers)
+        self.try_call(pool, "set_status", &[status], rule_ids, signers)
     }
 
     /// `pool::other(status)`, returning a diagnostic string for the failure.
@@ -357,11 +413,13 @@ impl Fixture {
         rule_ids: &[u32],
         signers: &[&Signer],
     ) -> std::string::String {
-        self.try_call(pool, "other", status, rule_ids, signers)
+        self.try_call(pool, "other", &[status], rule_ids, signers)
     }
 
-    /// Runs `pool::fn_name(status)` expecting failure, and returns the client
-    /// result together with the diagnostic events recorded by this call only.
+    /// Runs `pool::fn_name(args)` expecting failure, and returns the
+    /// `try_invoke_contract` result together with the diagnostic events recorded
+    /// by this call only. It is not a typed client call, so `fn_name` and the
+    /// argument count are free to differ from `FakePool`'s.
     ///
     /// The host deliberately hides the refusing `__check_auth`'s error from
     /// the client: a recoverable contract error is turned into an auth error
@@ -375,36 +433,40 @@ impl Fixture {
         &self,
         pool: &Address,
         fn_name: &str,
-        status: u32,
+        args: &[u32],
         rule_ids: &[u32],
         signers: &[&Signer],
     ) -> std::string::String {
         let e = &self.e;
         let before = e.logs().all().len();
-        self.arm(pool, fn_name, status, rule_ids, signers);
-        let client = FakePoolClient::new(e, pool);
-        let result = match fn_name {
-            "set_status" => client.try_set_status(&status),
-            _ => client.try_other(&status),
-        };
+        self.arm(pool, fn_name, args, rule_ids, signers);
+        let result = e.try_invoke_contract::<(), soroban_sdk::Error>(
+            pool,
+            &Symbol::new(e, fn_name),
+            Vec::from_iter(e, args.iter().copied().map(|a| a.into_val(e))),
+        );
         let logs = e.logs().all();
         std::format!("{result:?}\n{}", logs[before..].join("\n"))
     }
 
     /// Builds and installs the authorization entries an off-chain client sends
-    /// for `pool::fn_name(status)` authorized by the account under `rule_ids`:
+    /// for `pool::fn_name(args)` authorized by the account under `rule_ids`:
     /// the account's entry carrying the `AuthPayload`, plus one nested entry per
     /// delegated signer authorizing the digest preimage.
     fn arm(
         &self,
         pool: &Address,
         fn_name: &str,
-        status: u32,
+        args: &[u32],
         rule_ids: &[u32],
         signers: &[&Signer],
     ) {
         let e = &self.e;
-        let root = contract_fn(pool, fn_name, std::vec![to_scval(e, status)]);
+        let root = contract_fn(
+            pool,
+            fn_name,
+            args.iter().map(|a| to_scval(e, *a)).collect(),
+        );
         let expiration = e.ledger().sequence() + AUTH_VALID_FOR;
         let account_nonce = self.next_nonce();
 
@@ -545,7 +607,7 @@ fn adding_the_pause_rule_leaves_rule_zero_as_the_constructor_left_it() {
 
     let after = f.rule(0);
     assert_eq!(after, before);
-    // Read back from the fetched account wasm, not from a local recompile.
+    // Read back through the fetched account wasm's `get_context_rule`.
     assert_eq!(after.name, String::from_str(&f.e, "multisig"));
     assert_eq!(after.context_type, ContextRuleType::Default);
     assert_eq!(after.valid_until, None);
@@ -570,6 +632,9 @@ fn adding_the_pause_rule_leaves_rule_zero_as_the_constructor_left_it() {
 fn adding_the_pause_rule_appends_id_one_and_emits_context_rule_added() {
     let f = Fixture::new();
     let rule = f.add_pause_rule();
+    // `events().all()` is the last top-level call's events: read it before any
+    // other call to the account overwrites it.
+    let events = f.e.events().all();
 
     assert_eq!(rule.id, PAUSE_RULE);
     assert_eq!(rule.name, String::from_str(&f.e, "pause-xlm-usdc"));
@@ -596,11 +661,6 @@ fn adding_the_pause_rule_appends_id_one_and_emits_context_rule_added() {
         policy_ids: rule.policy_ids.clone(),
     }
     .to_xdr(&f.e, &f.account);
-    let events = f
-        .rule_events
-        .borrow()
-        .clone()
-        .expect("add_rule must have captured the account's events");
     assert!(
         events.events().contains(&expected),
         "no context_rule_added for rule {}: {events:?}",
@@ -629,7 +689,7 @@ fn the_pause_rule_refuses_any_other_status_or_function() {
     let rule = f.add_pause_rule();
     let pauser = f.pauser_signer();
 
-    for status in [0u32, 1, 3, 4, ON_ICE + 1] {
+    for status in [0u32, 1, 3, 4] {
         f.seed_status(&f.pool, 1);
         assert_err(
             &f.try_set_status(&f.pool, status, &[rule.id], &[&pauser]),
@@ -661,6 +721,27 @@ fn the_pause_rule_refuses_the_same_call_on_another_pool() {
         UNVALIDATED,
     );
     assert_eq!(f.status(&f.other_pool), 0);
+}
+
+#[test]
+fn the_pause_rule_refuses_set_status_with_a_second_argument() {
+    let f = Fixture::new();
+    let wide = f.e.register(WidePool, (f.account.clone(),));
+    let rule = f.add_rule(
+        ContextRuleType::CallContract(wide.clone()),
+        "pause-wide",
+        Some(VALID_UNTIL),
+        true,
+    );
+    let pauser = f.pauser_signer();
+
+    // Right pool, right function name, right status: the account matches the
+    // context to the rule, so only the one-argument pin can refuse this.
+    assert_err(
+        &f.try_call(&wide, "set_status", &[ON_ICE, 7], &[rule.id], &[&pauser]),
+        NOT_ALLOWED,
+    );
+    assert_eq!(WidePoolClient::new(&f.e, &wide).get_status(), 0);
 }
 
 // ################## (d)(e) only the rule's own signers ##################
@@ -750,6 +831,28 @@ fn the_pause_policy_on_a_default_rule_refuses_even_the_pause_call() {
         NOT_ALLOWED,
     );
     assert_eq!(f.status(&f.pool), 0);
+}
+
+// ################## (j) the policy refuses an unsigned context itself ##################
+
+#[test]
+fn a_pause_only_rule_refuses_an_unsigned_context() {
+    let f = Fixture::new();
+    let rule = f.add_pause_only_rule();
+
+    // No threshold policy, so the account passes the empty `AuthPayload.signers`
+    // straight to this policy: refusing it is its `authenticated_signers` check.
+    assert_err(
+        &f.try_set_status(&f.pool, ON_ICE, &[rule.id], &[]),
+        NOT_ALLOWED,
+    );
+    assert_eq!(f.status(&f.pool), 0);
+
+    // The same rule and call with the pauser authenticated succeed, so the
+    // refusal above was the missing signer and nothing else.
+    let pauser = f.pauser_signer();
+    f.set_status(&f.pool, ON_ICE, &[rule.id], &[&pauser]);
+    assert_eq!(f.status(&f.pool), ON_ICE);
 }
 
 // ################## (i) rent expiry ##################

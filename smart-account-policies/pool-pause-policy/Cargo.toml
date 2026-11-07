@@ -1,7 +1,6 @@
 [package]
 name = "pool-pause-policy"
 version = "0.1.0"
-authors = ["Blend Capital <gm@blend.capital>"]
 edition = "2021"
 rust-version.workspace = true
 publish = false

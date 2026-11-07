@@ -95,7 +95,11 @@ Precept is licensed under the MIT License — see [LICENSE](LICENSE). It is a fo
 Blend's copyright notice is kept in [LICENSE](LICENSE). The `pool-oracle-adapter` crate is also MIT — see
 [pool-oracle-adapter/LICENSE](pool-oracle-adapter/LICENSE). The prebuilt `comet.wasm` used only by the tests is a
 binary of [Comet](https://github.com/CometDEX/comet-contracts-v1) under its own license (AGPL-3.0) and is not covered
-by LICENSE.
+by LICENSE. The two prebuilt OpenZeppelin fixtures under
+`smart-account-policies/pool-pause-policy/testdata/` (`admin_smart_account.wasm`,
+`simple_threshold_policy.wasm`) are binaries of [OpenZeppelin
+stellar-contracts](https://github.com/OpenZeppelin/stellar-contracts) under its own MIT license (Copyright (c) 2024
+OpenZeppelin), which the MIT license above permits.
 
 ## Security
 

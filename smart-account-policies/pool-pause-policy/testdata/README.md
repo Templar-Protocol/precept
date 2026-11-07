@@ -13,26 +13,39 @@ rebuild of its source.
 `test.rs` pins both hashes; if either file changes, the pin test fails and the
 fixture has to be re-verified by hand before the hash is updated.
 
-Both are OpenZeppelin `stellar-contracts` **v0.8.0** (commit `ddc327eb`), built
-with `soroban-sdk` 28.0.0 / `rs` 1.91.1 per their embedded
-`contractenvmetav0` metadata. The account is the multisig `account` example
-deployed as the Templar admin account; the policy is the bundled
-`simple_threshold` policy, used as the co-policy that makes a single pauser
-signature sufficient.
+Both are OpenZeppelin `stellar-contracts` **v0.8.0**, built with `soroban-sdk`
+28.0.0 / rustc 1.91.1 / stellar-cli 28.1.0 per the `contractmetav0` section
+they embed (`rsver`, `rssdkver`, `cliver`). The account is the multisig
+`account` example deployed as the Templar admin account; the policy is the
+bundled `simple_threshold` policy, used as the co-policy that lets the multisig
+tooling read a threshold off the pause rule.
 
-Source: <https://github.com/OpenZeppelin/stellar-contracts/tree/ddc327eb>
+No git commit is recorded in that metadata, so the source attribution to commit
+`ddc327eb` does not come from these files: it rests on W2.1's rebuild of that
+tag (outside this PR) and on the crates.io `stellar-accounts` 0.8.0 source
+matching it. Source:
+<https://github.com/OpenZeppelin/stellar-contracts/tree/ddc327eb>.
 
-To re-fetch:
+Pin the **CI release** wasm hash for anything that deploys. A local
+`stellar contract build` hashes whatever toolchain happens to be installed
+(here rustc 1.99, while `rust-toolchain.toml` and CI pin 1.98.0), so its hash
+is not a pin: only the hash `release.yml` attests is the one
+`PAUSE_POLICY_WASM` and the registry may use. The `adf30835…` in the PR body is
+such a local build, recorded for reference only.
+
+To re-fetch (from `smart-account-policies/pool-pause-policy/`; `stellar-cli`
+28.1.0 takes the contract id only as `--id`/`--contract-id`, and the
+passphrase is required because the default network is testnet):
 
 ```sh
 stellar contract fetch \
-  --network network \
-  --rpc-url https://mainnet.rpc.stellar.xyz \
-  CCDZKWLV6JWM4V3WPMJHXTSLWG5IDQ5S3K7BI3AH7MBCRQCPCT3EJ2AI \
+  --id CCDZKWLV6JWM4V3WPMJHXTSLWG5IDQ5S3K7BI3AH7MBCRQCPCT3EJ2AI \
+  --rpc-url https://mainnet.sorobanrpc.com \
+  --network-passphrase 'Public Global Stellar Network ; September 2015' \
   -o testdata/admin_smart_account.wasm
 stellar contract fetch \
-  --network network \
-  --rpc-url https://mainnet.rpc.stellar.xyz \
-  CCEW5A2TKD5CUB2MPSSA2QJW2HHTGJK62SM4FXSB7MSBIPGYLPIWADBJ \
+  --id CCEW5A2TKD5CUB2MPSSA2QJW2HHTGJK62SM4FXSB7MSBIPGYLPIWADBJ \
+  --rpc-url https://mainnet.sorobanrpc.com \
+  --network-passphrase 'Public Global Stellar Network ; September 2015' \
   -o testdata/simple_threshold_policy.wasm
 ```

@@ -4,8 +4,11 @@
 //! A stateless OpenZeppelin smart-account [`Policy`] that lets a context rule
 //! do exactly one thing: call `set_status(2)` (On-Ice) on the pool the rule is
 //! scoped to. Attach it to a `CallContract(pool)` rule whose signer is the
-//! pause key; the rule's other policy (`simple_threshold`, threshold 1) makes
-//! that single signer sufficient.
+//! pause key; one matched signer is enough for this policy on its own. The
+//! rule's `simple_threshold` co-policy (threshold 1) is deployed with it so the
+//! multisig tooling can read a threshold off the rule and the keeper's TTL
+//! lane can extend the threshold policy's own storage entries (plan
+//! W2.5/W2.7), not because authorisation needs it.
 //!
 //! The smart account has already authenticated the rule's signers and matched
 //! the auth context to the rule when it calls [`Policy::enforce`]. This policy
@@ -21,6 +24,11 @@
 //! `set_status` is 10 characters and `symbol_short!` accepts at most 9.
 //!
 //! There is no state, no installation parameter and nothing to uninstall.
+//!
+//! A refusal traps as `Error(Contract, #1)`, which is also how the pool's
+//! `Error::InternalError = 1` (`pool/src/errors.rs:10`) reports: in the
+//! diagnostics of a failed pause transaction the two are distinguishable only
+//! by the contract id the event carries.
 use soroban_sdk::{
     auth::{Context, ContractContext},
     contract, contracterror, contractimpl, panic_with_error, Address, Env, Symbol, TryFromVal, Vec,
