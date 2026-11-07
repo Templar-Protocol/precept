@@ -25,7 +25,7 @@ env:
 
 jobs:
   blend:
-    name: pool, backstop, pool_factory
+    name: pool, backstop, pool_factory (+ oracle_tripper / pool_pause_policy when present)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -42,6 +42,12 @@ jobs:
           [[ -n "$target" ]] || { echo "no target in rust-toolchain.toml" >&2; exit 1; }
           echo "STELLAR_CLI=$cli" >> "$GITHUB_ENV"
           echo "WASM_DIR=target/$target/optimized" >> "$GITHUB_ENV"
+          # Attested extras exist only from the tags that introduced their
+          # crates; older tags keep attesting just the three blend WASMs.
+          extra=""
+          if [[ -d oracle-tripper ]]; then extra="$extra oracle_tripper.wasm"; fi
+          if [[ -d smart-account-policies ]]; then extra="$extra pool_pause_policy.wasm"; fi
+          echo "EXTRA_WASMS=$extra" >> "$GITHUB_ENV"
       # Installs the tag's pinned Rust + target from rust-toolchain.toml.
       - run: rustup toolchain install && rustc --version
       - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
@@ -55,6 +61,7 @@ jobs:
       - run: |
           mkdir out
           cp "$WASM_DIR"/{pool,backstop,pool_factory}.wasm out/
+          for w in $EXTRA_WASMS; do cp "$WASM_DIR/$w" out/; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: blend
