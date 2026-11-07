@@ -33,6 +33,8 @@ flowchart LR
 | `pool/src/` | Pool contract: `contract.rs` (trait + impl), `pool/` (submit, actions, reserve, user, status, bad_debt, gulp, …), `auctions/`, `math.rs`, `events.rs`, `spec/` (Certora), `proofs/` (Kani) |
 | `backstop/`, `pool-factory/` | Backstop (emissions/insurance disabled) and factory (deterministic pool address from `keccak256(salt ‖ admin)`) |
 | `pool-oracle-adapter/` | Immutable SEP-40 view over a proxy oracle. **Separate gate** (`just audit-ready`), 32 KiB size cap |
+| `oracle-tripper/` | One-shot oracle trip contract: the keeper's alert-sink route submits `trip(asset)` when a signed Hypernative alert arrives, and it creates and executes the governance `SetManualTrip` proposal in one transaction. soroban-sdk 25.3 like the rest of the root workspace; built with `stellar contract build` |
+| `smart-account-policies/` | Nested standalone Cargo workspace pinning soroban-sdk 28, because the deployed OpenZeppelin smart account (stellar-contracts v0.8.0) is built against it. `pool-pause-policy/` lives here; its tests run against the deployed mainnet account bytes in `pool-pause-policy/testdata/`. Separate gate commands below |
 | `shared/` | Source files included into pool and backstop via `#[path = "../../shared/…"] mod …;` |
 | `mocks/` | Mock pool, factory and ERC-3156 contracts for tests |
 | `test-suites/` | Integration tests (`tests/`), fixture (`src/`), fuzzing (`fuzz/`, its own workspace) |
@@ -53,6 +55,8 @@ just                      # build factory → backstop → pool wasm + stellar c
 just test                 # just build, then cargo test --all --tests
 cargo test -p test-suites --test <file>   # one integration file (after just build)
 just fmt                  # CI runs cargo fmt --all --check
+cargo test --manifest-path smart-account-policies/Cargo.toml   # nested sdk-28 workspace; `just test` runs it after `cargo test --all --tests`
+cargo fmt --manifest-path smart-account-policies/Cargo.toml --all -- --check   # `just fmt` runs the same without `-- --check`; CI (pull_request.yml) uses the check form
 just differential         # stock-vs-fork ADR-8 differential (pinned base 6cf6dd1, built with its own Makefile)
 just verify-local         # Python gates + Kani/Verus acceptance set under resource containment
 just fuzz-test fuzz-replay fuzz-lint fuzz-build
