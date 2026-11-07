@@ -21,8 +21,10 @@
 //!   governance action stay with the governance Admin / ManualTripper humans.
 //! - The `owner` (OpenZeppelin `Ownable`, two-step transfer) can rotate the
 //!   `caller` with `set_caller` and re-arm an asset's budget with `rearm`;
-//!   nothing else. It cannot trip, untrip, change the governance address or
-//!   upgrade. On mainnet it is the governance Admin's 2-of-3 smart account,
+//!   nothing else. It cannot trip directly; it can only change who may
+//!   (`set_caller`) and reset the one-shot budgets (`rearm`). It cannot
+//!   untrip, change the governance address or upgrade. On mainnet it is the
+//!   governance Admin's 2-of-3 smart account,
 //!   so rotating the key or re-arming is one signing round and the role
 //!   grant stays on this contract. Renouncing ownership freezes the caller
 //!   and the spent marks for good.
@@ -35,14 +37,17 @@
 //!   transaction. If the TTL is raised, the governance calls reject and the
 //!   whole `trip` invocation fails atomically.
 //! - A compromised `caller` can trip each Stellar-keyed feed at most once
-//!   until the owner re-arms it. Recovery is the governance Admin untripping
-//!   each asset; the spent marks stay until the owner `rearm`s them.
+//!   until the owner re-arms it. Recovery order on a suspected compromise:
+//!   `set_caller` (rotate the key) FIRST, then the governance Admin untrips
+//!   each asset, then the owner `rearm`s the spent marks. Never re-arm
+//!   before rotating: a still-armed budget hands the attacker another trip
+//!   per asset.
 //! - Only `Asset::Stellar` feeds are reachable (all three mainnet feeds
 //!   today).
 //! - Pinned to `rev eea0060d (governance v0.1.5, runtime v0.1.4)`.
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error, Address,
-    Env,
+    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
+    panic_with_error, Address, Env,
 };
 use stellar_access::ownable::{set_owner, Ownable};
 use stellar_macros::only_owner;
@@ -66,6 +71,16 @@ enum DataKey {
 pub enum TripperError {
     /// `trip` already fired for this asset; the owner must `rearm` it first.
     Spent = 1001,
+}
+
+/// Event emitted by `set_caller` with the previous and new caller, so a
+/// rotation (or an unexpected one) is visible to monitoring without polling
+/// `caller()`. Topics: `["caller"]`; data: `[old_caller, new_caller]`.
+#[contractevent(topics = ["caller"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallerChanged {
+    pub old_caller: Address,
+    pub new_caller: Address,
 }
 
 /// Subset of the governance contract used by the tripper, pinned to
@@ -140,10 +155,18 @@ impl OracleTripper {
 
     /// Owner-only: replaces the key allowed to call `trip`. The old key loses
     /// the power in the same call; the governance role stays on this contract.
+    /// Emits `CallerChanged` so a rotation (or an unexpected one) is visible
+    /// to monitoring.
     #[only_owner]
     pub fn set_caller(env: Env, caller: Address) {
         extend_self(&env);
+        let old_caller = stored_caller(&env);
         env.storage().instance().set(&DataKey::Caller, &caller);
+        CallerChanged {
+            old_caller,
+            new_caller: caller,
+        }
+        .publish(&env);
     }
 
     /// Owner-only: removes `asset`'s spent mark so `trip` can fire for it once

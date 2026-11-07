@@ -2,10 +2,10 @@
 //! (pinned at the v0.1.5 governance release), registered in a soroban test Env.
 
 use soroban_sdk::testutils::{
-    Address as _, Deployer as _, Ledger as _, LedgerInfo, MockAuth, MockAuthInvoke,
+    Address as _, Deployer as _, Events as _, Ledger as _, LedgerInfo, MockAuth, MockAuthInvoke,
 };
 use soroban_sdk::xdr::{ScErrorCode, ScErrorType};
-use soroban_sdk::{contract, contractimpl, Address, Env, Error, IntoVal, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, vec, Address, Env, Error, Event, IntoVal, Symbol, Vec};
 use templar_proxy_oracle_soroban_common::{
     Asset, PriceData, ProxyConfig, ProxyOracleClient, SourceConfig, DEFAULT_TTL_EXTEND_TO,
     DEFAULT_TTL_THRESHOLD,
@@ -20,7 +20,7 @@ use templar_proxy_oracle_soroban_governance_contract::{
     ProxyOracleGovernance, ProxyOracleGovernanceClient,
 };
 
-use crate::{OracleTripper, OracleTripperClient, TripperError};
+use crate::{CallerChanged, OracleTripper, OracleTripperClient, TripperError};
 
 /// A failure raised by a governance contract call made from inside `trip`.
 /// The tripper uses the non-try governance client, so the sub-contract error
@@ -347,22 +347,6 @@ fn caller_without_any_auth_cannot_trip() {
 }
 
 #[test]
-fn trip_fails_without_manual_tripper_role() {
-    let s = Setup::new(false);
-    let id_before = s.governance().next_proposal_id();
-
-    s.mock_trip(&s.caller);
-    assert_eq!(
-        s.tripper().try_trip(&s.asset),
-        Err(Ok(gov_err(GovernanceError::Unauthorized)))
-    );
-
-    assert!(!s.is_tripped());
-    assert_eq!(s.governance().next_proposal_id(), id_before);
-    assert!(s.governance().active_ids().is_empty());
-}
-
-#[test]
 fn trip_fails_when_role_granted_to_the_caller_key() {
     // The role must sit on the tripper contract: governance authorizes the
     // address that calls it, which is the tripper, not the caller key.
@@ -391,7 +375,8 @@ fn nonzero_set_manual_trip_ttl_fails_atomically() {
 
     s.mock_trip(&s.caller);
     // create_proposal succeeds with a non-zero ttl, execute_proposal then
-    // rejects the immature proposal; the whole call must roll back.
+    // rejects the immature proposal; the whole call must roll back, spent
+    // mark included.
     assert_eq!(
         s.tripper().try_trip(&s.asset),
         Err(Ok(gov_err(GovernanceError::ProposalNotMature)))
@@ -400,6 +385,7 @@ fn nonzero_set_manual_trip_ttl_fails_atomically() {
     assert!(s.governance().active_ids().is_empty());
     assert_eq!(s.governance().next_proposal_id(), id_before);
     assert!(!s.is_tripped());
+    assert!(s.tripper().is_armed(&s.asset));
 }
 
 #[test]
@@ -425,6 +411,23 @@ fn trip_fails_for_unconfigured_asset() {
     assert!(s.governance().active_ids().is_empty());
     assert_eq!(s.governance().next_proposal_id(), id_before);
     assert!(!s.is_tripped());
+    // The runtime rejected at execution stage; the spent mark for THIS
+    // asset must have rolled back with the rest of the frame.
+    assert!(s.tripper().is_armed(&unconfigured));
+}
+
+#[test]
+fn stranger_on_a_spent_asset_gets_the_auth_error_not_spent() {
+    // `require_auth` runs BEFORE the Spent check (lib.rs order): a caller
+    // who is not the stored caller must never learn which assets are spent.
+    let s = Setup::new(true);
+    s.mock_trip(&s.caller);
+    s.tripper().trip(&s.asset);
+    assert!(!s.tripper().is_armed(&s.asset));
+
+    let stranger = Address::generate(&s.env);
+    s.mock_trip(&stranger);
+    assert_eq!(s.tripper().try_trip(&s.asset), Err(Ok(auth_err())));
 }
 
 #[test]
@@ -493,10 +496,10 @@ fn budget_is_per_asset() {
 
 #[test]
 fn a_failed_governance_call_does_not_spend_the_budget() {
-    // The spent mark is written before the governance calls, so a rejected
-    // trip must revert it with the rest of the invocation: without the
-    // ManualTripper role the trip fails (as `trip_fails_without_manual_tripper_role`
-    // does) and the asset is still armed to trip later.
+    // Without the ManualTripper role every governance call inside `trip`
+    // is rejected (Unauthorized). The spent mark is written before those
+    // calls, so the rejection must revert it with the rest of the
+    // invocation: the asset is still armed to trip later.
     let s = Setup::with_role(RoleHolder::Nobody);
     let id_before = s.governance().next_proposal_id();
 
@@ -586,6 +589,23 @@ fn owner_rotates_the_caller_without_a_new_role_grant() {
 
     s.mock_set_caller(&s.owner, &new_caller);
     s.tripper().set_caller(&new_caller);
+
+    // The rotation is observable from the event stream alone (monitoring
+    // watches this instead of polling `caller()`): exactly one event from
+    // the tripper, topics ["caller"], data [old, new]. `events().all()`
+    // reports the last invocation, so this must come before any other
+    // contract call.
+    let ev = CallerChanged {
+        old_caller: s.caller.clone(),
+        new_caller: new_caller.clone(),
+    };
+    assert_eq!(
+        s.env.events().all(),
+        vec![
+            &s.env,
+            (s.tripper_id.clone(), ev.topics(&s.env), ev.data(&s.env))
+        ]
+    );
     assert_eq!(s.tripper().caller(), new_caller);
 
     // The old key lost the power in the same call.
@@ -626,4 +646,97 @@ fn only_the_owner_can_rearm() {
         assert_eq!(s.tripper().try_rearm(&s.asset), Err(Ok(auth_err())));
     }
     assert!(!s.tripper().is_armed(&s.asset));
+}
+
+#[test]
+fn two_step_ownership_transfer_moves_the_owner() {
+    // CodeRabbit: pin the full two-step lifecycle, including that the old
+    // owner loses `set_caller` / `rearm` only once the new owner accepts.
+    let s = Setup::new(true);
+    let new_owner = Address::generate(&s.env);
+    let live_until = s.env.ledger().max_live_until_ledger();
+
+    s.env.mock_auths(&[MockAuth {
+        address: &s.owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.tripper_id,
+            fn_name: "transfer_ownership",
+            args: (new_owner.clone(), live_until).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    }]);
+    s.tripper().transfer_ownership(&new_owner, &live_until);
+    // Pending transfer: the old owner still holds both powers.
+    s.mock_rearm(&s.owner, &s.asset);
+    s.tripper().rearm(&s.asset);
+
+    s.env.mock_auths(&[MockAuth {
+        address: &new_owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.tripper_id,
+            fn_name: "accept_ownership",
+            args: ().into_val(&s.env),
+            sub_invokes: &[],
+        },
+    }]);
+    s.tripper().accept_ownership();
+    assert_eq!(s.tripper().get_owner(), Some(new_owner.clone()));
+
+    // Spend the budget again so `rearm` has work to do.
+    s.mock_trip(&s.caller);
+    s.tripper().trip(&s.asset);
+
+    // The old owner lost both powers.
+    s.mock_rearm(&s.owner, &s.asset);
+    assert_eq!(s.tripper().try_rearm(&s.asset), Err(Ok(auth_err())));
+    let stranger_key = Address::generate(&s.env);
+    s.mock_set_caller(&s.owner, &stranger_key);
+    assert_eq!(
+        s.tripper().try_set_caller(&stranger_key),
+        Err(Ok(auth_err()))
+    );
+
+    // The new owner has both.
+    s.mock_rearm(&new_owner, &s.asset);
+    s.tripper().rearm(&s.asset);
+    assert!(s.tripper().is_armed(&s.asset));
+    s.mock_set_caller(&new_owner, &stranger_key);
+    s.tripper().set_caller(&stranger_key);
+    assert_eq!(s.tripper().caller(), stranger_key);
+}
+
+#[test]
+fn renounce_ownership_freezes_caller_and_spent_marks() {
+    // After renunciation `enforce_owner_auth` fails with OwnableError::
+    // OwnerNotSet (2100) for everyone, forever: neither `set_caller` nor
+    // `rearm` can ever run again, so a spent mark stays spent.
+    let s = Setup::new(true);
+    s.mock_trip(&s.caller);
+    s.tripper().trip(&s.asset);
+
+    s.env.mock_auths(&[MockAuth {
+        address: &s.owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.tripper_id,
+            fn_name: "renounce_ownership",
+            args: ().into_val(&s.env),
+            sub_invokes: &[],
+        },
+    }]);
+    s.tripper().renounce_ownership();
+    assert_eq!(s.tripper().get_owner(), None);
+
+    let owner_not_set = Error::from_contract_error(2100);
+    s.mock_rearm(&s.owner, &s.asset);
+    assert_eq!(s.tripper().try_rearm(&s.asset), Err(Ok(owner_not_set)));
+    assert!(!s.tripper().is_armed(&s.asset));
+    let new_caller = Address::generate(&s.env);
+    s.mock_set_caller(&s.owner, &new_caller);
+    assert_eq!(
+        s.tripper().try_set_caller(&new_caller),
+        Err(Ok(owner_not_set))
+    );
+    // The old caller key is also frozen in place: trip still needs it.
+    s.mock_trip(&s.caller);
+    assert_eq!(s.tripper().try_trip(&s.asset), Err(Ok(spent_err())));
 }

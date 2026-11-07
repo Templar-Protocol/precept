@@ -7,7 +7,8 @@ set dotenv-load := false
 
 root := justfile_directory()
 
-# Build factory → backstop → pool wasm, then optimize them.
+# Build factory → backstop → pool (+ oracle-tripper and any other crate wasm
+# in the workspace), then optimize them.
 default: build
 
 test: build
