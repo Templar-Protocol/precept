@@ -13,6 +13,7 @@ default: build
 
 test: build
     cargo test --all --tests
+    cargo test --manifest-path smart-account-policies/Cargo.toml
 
 build:
     cargo rustc --locked --manifest-path=pool-factory/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
@@ -21,6 +22,12 @@ build:
     # stellar-access (OpenZeppelin Ownable) turns on soroban-sdk's spec-shaking v2,
     # which only the Stellar CLI's build can link; same output path as cargo rustc.
     stellar contract build --locked --package oracle-tripper
+    # The smart-account policy is a separate workspace on soroban-sdk 28 (the sdk
+    # of the deployed OpenZeppelin account). Its wasm goes into the root release
+    # dir so the optimize step below and release.yml pick it up.
+    stellar contract build --locked \
+        --manifest-path smart-account-policies/pool-pause-policy/Cargo.toml \
+        --out-dir target/wasm32v1-none/release
     mkdir -p target/wasm32v1-none/optimized
     stellar contract optimize \
         --wasm target/wasm32v1-none/release/pool_factory.wasm \
@@ -34,6 +41,9 @@ build:
     stellar contract optimize \
         --wasm target/wasm32v1-none/release/oracle_tripper.wasm \
         --wasm-out target/wasm32v1-none/optimized/oracle_tripper.wasm
+    stellar contract optimize \
+        --wasm target/wasm32v1-none/release/pool_pause_policy.wasm \
+        --wasm-out target/wasm32v1-none/optimized/pool_pause_policy.wasm
     cd target/wasm32v1-none/optimized/ && ls -l *.wasm
 
 # Explicit base-versus-fork differential (ADR 0008 step 8 / ADR 0011 step 5).
@@ -99,6 +109,7 @@ fuzz-build:
 fmt:
     cargo fmt --all
     cargo fmt --manifest-path test-suites/fuzz/Cargo.toml --all
+    cargo fmt --manifest-path smart-account-policies/Cargo.toml --all
 
 clean:
     cargo clean

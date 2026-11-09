@@ -48,6 +48,7 @@ jobs:
     - run: rustup toolchain install
     - run: cargo fmt --all --check
     - run: cargo fmt --manifest-path test-suites/fuzz/Cargo.toml --all -- --check
+    - run: cargo fmt --manifest-path smart-account-policies/Cargo.toml --all -- --check
 
   build-and-test:
     runs-on: ubuntu-latest
