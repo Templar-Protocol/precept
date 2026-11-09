@@ -14,8 +14,9 @@
 //! This policy then refuses the call unless all of these hold:
 //!
 //! - at least one of the rule's signers authenticated;
-//! - the rule is `CallContract(pool)` (`Default`, `CreateContract` and
-//!   `CreateContractExternalRef` rules are refused);
+//! - the rule is `CallContract(pool)` (`install` already refuses to install
+//!   on a `Default`, `CreateContract` or `CreateContractExternalRef` rule;
+//!   `enforce` keeps the same check as the fail-closed backstop);
 //! - the context is a call to that `pool`'s `set_status` with exactly one
 //!   argument, the `u32` `2`.
 //!
@@ -86,11 +87,18 @@ impl Policy for PoolPausePolicy {
     }
 
     fn install(
-        _e: &Env,
+        e: &Env,
         _install_params: Self::AccountParams,
-        _context_rule: ContextRule,
+        context_rule: ContextRule,
         _smart_account: Address,
     ) {
+        // A rule that is not CallContract(pool) can never authorize anything
+        // through this policy, so reject it at add_context_rule time instead
+        // of at the pause that needs it. enforce keeps the same check as the
+        // fail-closed backstop.
+        if !matches!(context_rule.context_type, ContextRuleType::CallContract(_)) {
+            panic_with_error!(e, PauseError::NotAllowed);
+        }
     }
 
     fn uninstall(_e: &Env, _context_rule: ContextRule, _smart_account: Address) {}

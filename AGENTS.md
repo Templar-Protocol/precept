@@ -55,7 +55,7 @@ just                      # build factory → backstop → pool wasm + stellar c
 just test                 # just build, then cargo test --all --tests
 cargo test -p test-suites --test <file>   # one integration file (after just build)
 just fmt                  # CI runs cargo fmt --all --check
-cargo test --manifest-path smart-account-policies/Cargo.toml   # nested sdk-28 workspace; `just test` runs it after `cargo test --all --tests`
+cargo test --locked --manifest-path smart-account-policies/Cargo.toml   # nested sdk-28 workspace; `just test` runs it after `cargo test --all --tests`
 cargo fmt --manifest-path smart-account-policies/Cargo.toml --all -- --check   # `just fmt` runs the same without `-- --check`; CI (pull_request.yml) uses the check form
 just differential         # stock-vs-fork ADR-8 differential (pinned base 6cf6dd1, built with its own Makefile)
 just verify-local         # Python gates + Kani/Verus acceptance set under resource containment
