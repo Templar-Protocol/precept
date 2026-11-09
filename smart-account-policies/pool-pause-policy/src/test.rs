@@ -277,24 +277,32 @@ impl Fixture {
         )
     }
 
-    /// Same installation, on a `Default` rule: nothing to pin the call against.
-    /// The name stays within `MAX_NAME_SIZE` (20 bytes) or `add_context_rule`
-    /// refuses with `#3015` before the rule exists.
-    fn add_default_pause_rule(&self) -> ContextRule {
-        self.add_rule(ContextRuleType::Default, "default-pause", None, true)
+    /// Same installation, on a `Default` rule: nothing to pin the call
+    /// against, so the policy's `install` refuses it. Returns the
+    /// `add_context_rule` diagnostic, like [`Fixture::try_call`]. The name
+    /// stays within `MAX_NAME_SIZE` (20 bytes) or `add_context_rule` refuses
+    /// with `#3015` before the policy is even called.
+    fn try_add_default_pause_rule(&self) -> std::string::String {
+        self.try_add_rule(ContextRuleType::Default, "default-pause", None, true)
+            .0
     }
 
     /// Creates a rule through the fetched account wasm's `add_context_rule`
-    /// entrypoint, the call the mainnet packet makes. `mock_all_auths` stands
-    /// in for the 2-of-3 signatures; it stays in force until the next
-    /// [`Fixture::arm`].
-    fn add_rule(
+    /// entrypoint, the call the mainnet packet makes, returning the failure
+    /// diagnostic together with the created rule (set only on success), like
+    /// [`Fixture::try_call`] returns a diagnostic instead of panicking. The
+    /// rule comes from the call's own return value: reading it back with
+    /// `get_context_rule` would be a later top-level call and would overwrite
+    /// the `context_rule_added` event the event test reads.
+    /// `mock_all_auths` stands in for the 2-of-3 signatures; it stays in
+    /// force until the next [`Fixture::arm`].
+    fn try_add_rule(
         &self,
         context_type: ContextRuleType,
         name: &str,
         valid_until: Option<u32>,
         with_threshold: bool,
-    ) -> ContextRule {
+    ) -> (std::string::String, Option<ContextRule>) {
         let e = &self.e;
         let mut policies: Map<Address, Val> = Map::new(e);
         if with_threshold {
@@ -305,7 +313,8 @@ impl Fixture {
         }
         policies.set(self.pause_policy.clone(), ().into_val(e));
         e.mock_all_auths();
-        e.invoke_contract::<ContextRule>(
+        let before = e.logs().all().len();
+        let result = e.try_invoke_contract::<ContextRule, soroban_sdk::Error>(
             &self.account,
             &Symbol::new(e, "add_context_rule"),
             soroban_sdk::vec![
@@ -316,7 +325,27 @@ impl Fixture {
                 Vec::from_iter(e, [Signer::Delegated(self.pauser.clone())]).into_val(e),
                 policies.into_val(e),
             ],
-        )
+        );
+        let logs = e.logs().all();
+        let diag = std::format!("{result:?}\n{}", logs[before..].join("\n"));
+        let rule = match result {
+            Ok(Ok(rule)) => Some(rule),
+            _ => None,
+        };
+        (diag, rule)
+    }
+
+    /// [`Fixture::try_add_rule`], expecting success.
+    fn add_rule(
+        &self,
+        context_type: ContextRuleType,
+        name: &str,
+        valid_until: Option<u32>,
+        with_threshold: bool,
+    ) -> ContextRule {
+        self.try_add_rule(context_type, name, valid_until, with_threshold)
+            .1
+            .expect("add_context_rule succeeded in the other helper's path")
     }
 
     fn pauser_signer(&self) -> Signer {
@@ -415,8 +444,30 @@ impl Fixture {
         signers: &[&Signer],
     ) -> std::string::String {
         let e = &self.e;
+        let root = contract_fn(
+            pool,
+            fn_name,
+            args.iter().map(|a| to_scval(e, *a)).collect(),
+        );
+        self.try_call_root(&root, pool, fn_name, args, rule_ids, signers)
+    }
+
+    /// [`Fixture::try_call`] with a caller-built authorization tree. The
+    /// actual invocation is still the flat `pool::fn_name(args)`; `root`
+    /// claims the tree the signature covers, sub-invocations and all, so the
+    /// account's `__check_auth` sees one auth context per tree node.
+    fn try_call_root(
+        &self,
+        root: &SorobanAuthorizedInvocation,
+        pool: &Address,
+        fn_name: &str,
+        args: &[u32],
+        rule_ids: &[u32],
+        signers: &[&Signer],
+    ) -> std::string::String {
+        let e = &self.e;
         let before = e.logs().all().len();
-        self.arm(pool, fn_name, args, rule_ids, signers);
+        self.arm_tree(root, rule_ids, signers);
         let result = e.try_invoke_contract::<(), soroban_sdk::Error>(
             pool,
             &Symbol::new(e, fn_name),
@@ -444,6 +495,12 @@ impl Fixture {
             fn_name,
             args.iter().map(|a| to_scval(e, *a)).collect(),
         );
+        self.arm_tree(&root, rule_ids, signers);
+    }
+
+    /// [`Fixture::arm`] with a caller-built root invocation tree.
+    fn arm_tree(&self, root: &SorobanAuthorizedInvocation, rule_ids: &[u32], signers: &[&Signer]) {
+        let e = &self.e;
         let expiration = e.ledger().sequence() + AUTH_VALID_FOR;
         let account_nonce = self.next_nonce();
 
@@ -467,7 +524,7 @@ impl Fixture {
 
         let preimage = AuthDigestPreimage {
             account: self.account.clone(),
-            signature_payload: signature_payload(e, account_nonce, expiration, &root),
+            signature_payload: signature_payload(e, account_nonce, expiration, root),
             context_rule_ids: rule_ids_vec(e, rule_ids),
         };
         for s in signers {
@@ -676,6 +733,85 @@ fn the_pause_rule_refuses_any_other_status_or_function() {
     assert_eq!(f.status(&f.pool), 1);
 }
 
+/// The account's `do_check_auth` runs every context of the signed tree
+/// through the rule's policies, one aligned `context_rule_ids` entry per
+/// context. A bundled call is therefore refused by the extra context, not by
+/// the pause it is bundled with.
+#[test]
+fn the_pause_rule_refuses_a_pause_bundled_with_a_second_invocation() {
+    let f = Fixture::new();
+    let other_pool = f.e.register(FakePool, (f.account.clone(),));
+    let rule = f.add_pause_rule();
+    let pauser = f.pauser_signer();
+    let pause = || contract_fn(&f.pool, "set_status", std::vec![to_scval(&f.e, ON_ICE)]);
+
+    // Control: a tree of two pause calls passes every context's checks, so
+    // what follows is the second call refusing, not the tree machinery.
+    let two_pauses = SorobanAuthorizedInvocation {
+        function: pause().function,
+        sub_invocations: VecM::try_from(&std::vec![pause()]).unwrap(),
+    };
+    f.seed_status(&f.pool, 1);
+    f.try_call_root(
+        &two_pauses,
+        &f.pool,
+        "set_status",
+        &[ON_ICE],
+        &[rule.id, rule.id],
+        &[&pauser],
+    );
+    assert_eq!(f.status(&f.pool), ON_ICE, "the two-pause bundle must pass");
+
+    // A second call to another function on the same pool matches the rule
+    // (same contract), so the account accepts it and this policy refuses.
+    let bundled_other = SorobanAuthorizedInvocation {
+        function: pause().function,
+        sub_invocations: VecM::try_from(&std::vec![contract_fn(
+            &f.pool,
+            "other",
+            std::vec![to_scval(&f.e, ON_ICE)],
+        )])
+        .unwrap(),
+    };
+    f.seed_status(&f.pool, 1);
+    assert_err(
+        &f.try_call_root(
+            &bundled_other,
+            &f.pool,
+            "set_status",
+            &[ON_ICE],
+            &[rule.id, rule.id],
+            &[&pauser],
+        ),
+        NOT_ALLOWED,
+    );
+    assert_eq!(f.status(&f.pool), 1, "a refused bundle must not write");
+
+    // A second call on another contract finds no rule for that context, so
+    // the account refuses the whole tree before any policy runs.
+    let bundled_other_contract = SorobanAuthorizedInvocation {
+        function: pause().function,
+        sub_invocations: VecM::try_from(&std::vec![contract_fn(
+            &other_pool,
+            "set_status",
+            std::vec![to_scval(&f.e, ON_ICE)],
+        )])
+        .unwrap(),
+    };
+    assert_err(
+        &f.try_call_root(
+            &bundled_other_contract,
+            &f.pool,
+            "set_status",
+            &[ON_ICE],
+            &[rule.id, rule.id],
+            &[&pauser],
+        ),
+        UNVALIDATED,
+    );
+    assert_eq!(f.status(&f.pool), 1, "a refused bundle must not write");
+}
+
 #[test]
 fn the_pause_rule_refuses_the_same_call_on_another_pool() {
     let f = Fixture::new();
@@ -780,18 +916,14 @@ fn the_rule_zero_signers_are_not_restricted_by_the_pause_rule() {
 }
 
 #[test]
-fn the_pause_policy_on_a_default_rule_refuses_even_the_pause_call() {
+fn a_default_rule_cannot_install_the_pause_policy() {
     let f = Fixture::new();
-    let rule = f.add_default_pause_rule();
-    let pauser = f.pauser_signer();
 
-    // Fail closed: with no pinned pool there is nothing to compare the call
-    // against, so even set_status(2) is refused.
-    assert_err(
-        &f.try_set_status(&f.pool, ON_ICE, &[rule.id], &[&pauser]),
-        NOT_ALLOWED,
-    );
-    assert_eq!(f.status(&f.pool), 0);
+    // A `Default` rule has no pool to pin the call against, so the policy is
+    // refused at `add_context_rule` time — its `install` — rather than at the
+    // pause that would need it. The rule is never created.
+    assert_err(&f.try_add_default_pause_rule(), NOT_ALLOWED);
+    assert_eq!(f.rule_count(), 1);
 }
 
 #[test]
@@ -844,4 +976,10 @@ fn rent_expiry_does_not_change_what_the_pause_rule_authorizes() {
         &f.try_other(&f.pool, ON_ICE, &[rule.id], &[&pauser]),
         NOT_ALLOWED,
     );
+
+    // The allowed path still works after the lapse too: the refusals above
+    // alone would also pass under a regression that broke the pause itself
+    // once the entries had expired.
+    f.set_status(&f.pool, ON_ICE, &[rule.id], &[&pauser]);
+    assert_eq!(f.status(&f.pool), ON_ICE);
 }

@@ -13,7 +13,7 @@ default: build
 
 test: build
     cargo test --all --tests
-    cargo test --manifest-path smart-account-policies/Cargo.toml
+    cargo test --locked --manifest-path smart-account-policies/Cargo.toml
 
 build:
     cargo rustc --locked --manifest-path=pool-factory/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
