@@ -123,14 +123,21 @@ being executed, the create fails (out-of-order); re-read and re-propose.
     --contract-id <TRIPPER_CONTRACT_ID> \
     --source-account <CALLER_PUBLIC_G> --build-only \
     -- trip --asset <ASSET_CONTRACT_ID> \
-  | stellar --network <NETWORK> tx simulate --source-account <CALLER_PUBLIC_G>
+  | stellar --network <NETWORK> tx simulate --source-account <CALLER_PUBLIC_G> \
+  | stellar xdr decode --type TransactionEnvelope --output json \
+  | jq -c '.tx.tx | {source: .source_account,
+      auth: [.operations[0].body.invoke_host_function.auth[]
+             | {credentials, fn: .root_invocation.function.contract_fn}]}'
   ```
 
-  Inspect the returned auth: it must record exactly one
-  `SorobanAuthorizationEntry` for `<CALLER_PUBLIC_G>` whose root invocation
-  is `trip(asset)` on the tripper. A successful simulation with no auth
-  entry (or an entry for another address) means the call would not be
-  authorized on chain.
+  `tx simulate` prints the assembled envelope as base64 XDR, so decode it
+  before inspecting auth. Because the caller is also the transaction source,
+  its authorization is recorded as `"credentials": "source_account"`, with no
+  address in the entry. Expect `source` to be `<CALLER_PUBLIC_G>` and exactly
+  one auth entry with `source_account` credentials whose `fn` is `trip` on
+  `<TRIPPER_CONTRACT_ID>` with your asset. No entry, more than one, or an
+  `address` credential for another account means the call would not be
+  authorized by the caller key on chain.
 - On mainnet, the governance and runtime code must be the registry's
   proxy-governance v0.1.5 and proxy-oracle runtime v0.1.4 rows
   (`registry/mainnet.jsonl`); this crate's ABI is pinned to rev eea0060d of
