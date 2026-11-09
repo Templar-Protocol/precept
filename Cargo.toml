@@ -10,6 +10,7 @@ members = [
     "mocks/moderc3156-iface",
     "pool-factory",
     "pool-oracle-adapter",
+    "oracle-tripper",
     "test-suites"
 ]
 

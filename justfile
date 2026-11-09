@@ -7,16 +7,20 @@ set dotenv-load := false
 
 root := justfile_directory()
 
-# Build factory → backstop → pool wasm, then optimize them.
+# Build factory → backstop → pool (+ oracle-tripper and any other crate wasm
+# in the workspace), then optimize them.
 default: build
 
 test: build
     cargo test --all --tests
 
 build:
-    cargo rustc --manifest-path=pool-factory/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
-    cargo rustc --manifest-path=backstop/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
-    cargo rustc --manifest-path=pool/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
+    cargo rustc --locked --manifest-path=pool-factory/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
+    cargo rustc --locked --manifest-path=backstop/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
+    cargo rustc --locked --manifest-path=pool/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
+    # stellar-access (OpenZeppelin Ownable) turns on soroban-sdk's spec-shaking v2,
+    # which only the Stellar CLI's build can link; same output path as cargo rustc.
+    stellar contract build --locked --package oracle-tripper
     mkdir -p target/wasm32v1-none/optimized
     stellar contract optimize \
         --wasm target/wasm32v1-none/release/pool_factory.wasm \
@@ -27,6 +31,9 @@ build:
     stellar contract optimize \
         --wasm target/wasm32v1-none/release/pool.wasm \
         --wasm-out target/wasm32v1-none/optimized/pool.wasm
+    stellar contract optimize \
+        --wasm target/wasm32v1-none/release/oracle_tripper.wasm \
+        --wasm-out target/wasm32v1-none/optimized/oracle_tripper.wasm
     cd target/wasm32v1-none/optimized/ && ls -l *.wasm
 
 # Explicit base-versus-fork differential (ADR 0008 step 8 / ADR 0011 step 5).
