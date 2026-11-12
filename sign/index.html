@@ -6,38 +6,47 @@
 <!-- GitHub Pages sends no headers, so the policy has to live here. `frame-ancestors` cannot be set
      from a meta tag, which is the one protection this page cannot have. -->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src wss://relay.walletconnect.org; base-uri 'none'; form-action 'none'">
-<title>Sign an admin action</title>
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src wss://relay.walletconnect.org https://mainnet.sorobanrpc.com https://soroban-testnet.stellar.org; base-uri 'none'; form-action 'none'">
+<title>Precept admin console</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 16px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; max-width: 46rem; margin: 2rem auto;
          padding: 0 1rem; }
   h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.1rem; }
   .guard { border: 2px solid #c0392b; border-radius: .5rem; padding: .9rem 1rem; margin: 1rem 0; }
   .guard b { color: #c0392b; }
   pre, code, textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   pre { background: rgba(127,127,127,.12); padding: .8rem; border-radius: .4rem; overflow-x: auto;
         white-space: pre-wrap; word-break: break-word; }
-  .payload { font-size: .92rem; }
+  .payload { font-size: .92rem; word-break: break-all; }
   button { font: inherit; padding: .55rem .9rem; margin: .3rem .4rem .3rem 0; border-radius: .45rem;
            border: 1px solid #888; background: rgba(127,127,127,.08); cursor: pointer; }
   button:disabled { opacity: .45; cursor: not-allowed; }
-  #status { margin-top: 1rem; font-weight: 600; }
+  #status, #b-status { margin-top: 1rem; font-weight: 600; }
   .err { color: #c0392b; }
   .ok { color: #1e8449; }
   textarea { width: 100%; min-height: 5.5rem; }
+  #handoff { min-height: 13rem; }
   .muted { opacity: .75; font-size: .92rem; }
-  #qr canvas, #qr img { image-rendering: pixelated; }
+  .row { border: 1px solid rgba(127,127,127,.5); border-radius: .5rem; padding: .6rem .9rem; margin: .6rem 0; }
+  .row h3 { font-size: 1rem; margin: 0 0 .2rem; }
+  .row p { margin: .15rem 0; }
+  #qr canvas, #qr img, #b-qr canvas, #b-qr img { image-rendering: pixelated; }
 </style>
 </head>
 <body>
-<h1>Sign an admin action</h1>
-<p class="muted">This page does not know who you are, has no server and keeps no record of you. It
-checks the link you were sent against the data inside it, shows you exactly what it says, and hands the
-signing to Freighter. The only thing it stores is a WalletConnect session while the mobile path is
+<h1>Precept admin console</h1>
+<p class="muted">This page has no server and keeps no record of you. It checks everything it is about to
+sign against pinned data, shows you exactly what it says, and hands the signing to Freighter. It talks to
+the public Stellar RPC (reads, simulation and, when you press the button, submit) and, on the mobile path,
+the WalletConnect relay. The only thing it stores is a WalletConnect session while the mobile path is
 open, and it deletes that when the request finishes.</p>
 
-<div class="guard">
+<div id="fatal" hidden></div>
+
+<!-- ============================= sign view: a link with #b=… ============================= -->
+<div id="sign-intro" class="guard" hidden>
   <b>Three things to check before you approve.</b>
   <ol>
     <li>This message came from the <b>known proposer, on a channel you have already authenticated</b>.
@@ -53,13 +62,13 @@ open, and it deletes that when the request finishes.</p>
   If anything differs, stop and ask the proposer on another channel.
 </div>
 
-<div id="fatal" hidden></div>
-
 <section id="main" hidden>
-  <h2 style="font-size:1.1rem">The action</h2>
+  <p id="carried" class="ok" hidden></p>
+
+  <h2>The action</h2>
   <pre id="action"></pre>
 
-  <h2 style="font-size:1.1rem">What you are signing</h2>
+  <h2>What you are signing</h2>
   <p class="payload"><b>network</b> <span id="network"></span> &nbsp; <b>smart account</b>
     <span id="account"></span><br>
     <b>valid until</b> <span id="expiry"></span><br>
@@ -71,7 +80,7 @@ open, and it deletes that when the request finishes.</p>
   <details><summary class="muted">the same bytes as Freighter prints them</summary>
     <pre id="payload-freighter" class="payload"></pre></details>
 
-  <h2 style="font-size:1.1rem">Sign as</h2>
+  <h2>Sign as</h2>
   <p><label for="signer">your account</label> <select id="signer"></select></p>
 
   <p>
@@ -83,12 +92,68 @@ open, and it deletes that when the request finishes.</p>
   <p id="status" role="status"></p>
 
   <section id="share-box" hidden>
-    <h2 style="font-size:1.1rem">Send this back to the proposer</h2>
+    <h2>Send this back to the proposer</h2>
     <p class="muted">This code contains only your signature and public data. It authorizes this one
       action, and only until the expiry above.</p>
     <textarea id="share" readonly spellcheck="false"></textarea>
     <p><button id="copy" type="button">Copy the code</button> <span id="copy-status"
       class="muted"></span></p>
+  </section>
+
+  <section id="submit-box" hidden>
+    <h2>Submit it</h2>
+    <p>Both signatures are in. <b id="submit-fee"></b></p>
+    <p><button id="submit" type="button">Submit now</button></p>
+    <p id="submit-status" role="status"></p>
+    <p id="submit-result"></p>
+  </section>
+</section>
+
+<!-- ============================= builder view: no #b ============================= -->
+<section id="builder" hidden>
+  <div class="guard"><b>Incident use.</b> Every action is shown in plain words before you sign. On-Ice and
+    oracle trips take effect immediately.</div>
+
+  <p>
+    <label><input type="radio" name="net" value="mainnet" checked> mainnet</label>
+    <label id="net-testnet" hidden><input type="radio" name="net" value="testnet"> testnet (rehearsal)</label>
+  </p>
+  <p>
+    <button id="b-ext" type="button">Connect Freighter extension</button>
+    <button id="b-mob" type="button">Connect Freighter Mobile (QR)</button>
+  </p>
+  <div id="b-qr"></div>
+  <div id="me" class="payload"></div>
+  <p>
+    <label><input type="checkbox" id="practice"> Practice only (simulate, send nothing)</label>
+    <button id="refresh" type="button">Refresh state</button>
+  </p>
+  <p class="muted" id="practice-note"></p>
+
+  <div id="rows"></div>
+
+  <section id="confirm" class="guard" hidden>
+    <h2 id="confirm-title"></h2>
+    <pre id="confirm-action"></pre>
+    <p class="payload"><b>valid until</b> <span id="confirm-expiry"></span><br>
+      <b>signature_payload</b> (hex)<br><code id="confirm-payload"></code></p>
+    <p class="muted">In Freighter, expand <code>__check_auth</code> and check the network, the smart
+      account and the <code>signature_payload</code> (32 decimal bytes).</p>
+    <p><button id="confirm-sign" type="button">Sign</button>
+       <button id="confirm-cancel" type="button">Cancel</button></p>
+  </section>
+
+  <p id="b-status" role="status"></p>
+  <p id="result"></p>
+  <p><button id="retry-exec" type="button" hidden></button></p>
+
+  <section id="handoff-box" hidden>
+    <h2>Send this to the second signer</h2>
+    <p class="muted">The link carries your signature. It authorizes this one action, only until the expiry.</p>
+    <textarea id="handoff" readonly spellcheck="false"></textarea>
+    <p><button id="copy-msg" type="button">Copy message</button> <span id="copy-msg-status" class="muted"></span></p>
+    <p class="muted">Your signed share, for the command-line fallback (<code>smart_account.py submit --share</code>):</p>
+    <textarea id="own-share" readonly spellcheck="false"></textarea>
   </section>
 </section>
 

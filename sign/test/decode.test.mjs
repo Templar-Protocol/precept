@@ -74,7 +74,7 @@ describe('refusals', () => {
   });
 
   test('a bundle that selects a rule other than 0 is refused', async () => {
-    await refuses((b) => { b.context_rule_ids = [3]; }, 'other than 0');
+    await refuses((b) => { b.context_rule_ids = [3]; }, 'only signs rule 0');
   });
 
   test('a different action in the host function is refused', async () => {

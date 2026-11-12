@@ -53,8 +53,9 @@ Three things, in this order:
   refused (the CLI signs with the same limit).
 * **Refuses sub-invocations.** If an action authorizes nested calls, the page says so and refuses;
   use the command-line tool for those (none of the hand-off actions have sub-invocations).
-* **Never asks for a secret.** No key input, no cookies, and no network calls except the WalletConnect
-  relay when you choose the mobile path. It does write to browser storage in one case only: the
+* **Never asks for a secret.** No key input and no cookies. Network calls: the WalletConnect relay when you
+  choose the mobile path, and the public Stellar RPC of the pinned network (`actions.mjs:EMERGENCY.<net>.rpc`)
+  for the emergency console's reads, simulation and submit. It does write to browser storage in one case only: the
   WalletConnect session (the mobile path) keeps its keys in this origin's localStorage while it is
   open. That session is disconnected and those keys are cleared in a `finally` block as soon as the
   request finishes, success or failure — and because GitHub Pages gives every project of the org the
@@ -65,16 +66,45 @@ Three things, in this order:
   `integrity=` (SRI) pin; ES-module imports cannot use SRI, which is why the proposer's `link
   --verify-page` compares every deployed file's sha256 with the reviewed checkout before a link is sent.
 * **CSP in a `<meta>` tag** (`default-src 'none'; script-src 'self'; style-src 'self'
-  'unsafe-inline'; img-src 'self' data:; connect-src wss://relay.walletconnect.org; base-uri 'none';
-  form-action 'none'`). GitHub Pages cannot send headers, so `frame-ancestors` is not available — the
+  'unsafe-inline'; img-src 'self' data:; connect-src wss://relay.walletconnect.org https://mainnet.sorobanrpc.com
+  https://soroban-testnet.stellar.org; base-uri 'none'; form-action 'none'`). GitHub Pages cannot send headers, so
+  `frame-ancestors` is not available — the
   one protection this page cannot have.
+
+## Emergency console (no `#b=` in the URL)
+
+Opening the page without a link shows a short, pinned list of actions (`actions.mjs:EMERGENCY`): the page
+builds, signs and submits them itself, and a **Practice** checkbox stops every one-person action after an
+enforcing simulation (nothing is sent).
+
+| action | who | how |
+|---|---|---|
+| On-Ice a pool | one signer | the signer's own pause rule (1 for xlm-usdc, 2 for dejaaa-usdc) calling `set_status(2)`; one auth signature, one transaction |
+| Trip / untrip an oracle asset | one signer with `ManualTripper` | governance `create_proposal(SetManualTrip)` then `execute_proposal`, two transactions (Freighter asks twice) |
+| Back to Active, On-Ice via rule 0 | two signers | the first signer builds and signs; the link carries that signature (`&p=pss1.…`); the second signer checks it, signs and presses **Submit now** |
+
+Every authorization the page builds goes through `decode.mjs:derive` before a wallet is asked, the same
+policy a link goes through: rule 0, or a pinned pause rule calling `set_status(2)` on its own pool, and
+nothing else. A carried signature is verified against the link's own payload and the other signer's entry
+(`verifyCarriedShare`). Every transaction is simulated with `authMode: enforce`, so the chain refuses a bad
+call before anything is sent, and the signed envelope is refused if the wallet changed anything but adding
+its signature. The fee (well under 1 XLM, capped at 5 XLM) is paid by the signer who presses submit.
+
+The one-time mainnet setup that makes solo On-Ice work (adding the three signers to pause rules 1 and 2 and
+granting `ManualTripper` to the third) is a 2-of-3 batch built with `smart_account.py propose`; until it has
+run the page tells a signer who is not on the rule to use the 2-of-3 route.
+
+`test/testnet-rehearsal.mjs` is a manual driver that runs the same flows against the permanent testnet
+rehearsal stack with key-backed wallets (see the header of that file).
 
 ## XDR decoding
 
-`xdr-lite.mjs` is a ~300-line reader/writer for exactly these structures: a Soroban authorization
-entry and the `HashIdPreimage` (legacy and address-bound). It refuses every arm it does not implement
+`xdr-lite.mjs` is a ~500-line reader/writer for exactly these structures: a Soroban authorization
+entry, the `HashIdPreimage` (legacy and address-bound), and, for the emergency console, the writers for
+new entries, host functions, transactions and envelopes. It refuses every arm it does not implement
 (no skipping, no best effort) and refuses trailing bytes. The payload binding re-uses the entry's
-**original invocation bytes**, so a decoding bug can never change what gets hashed.
+**original invocation bytes**, so a decoding bug can never change what gets hashed. Every writer is
+byte-checked against the Python tool (`test/builder.test.mjs`, vectors under `"builder"` in `vectors.json`).
 
 Validated against the Python tool that the proposer runs:
 
@@ -94,11 +124,18 @@ Validated against the Python tool that the proposer runs:
 | file | what |
 |---|---|
 | `index.html` | markup + CSP + the two `<script>` tags |
-| `app.mjs` | DOM wiring, extension + WalletConnect paths, share output |
-| `decode.mjs` | fragment decode, full re-derivation, rendering, share encode/decode |
+| `app.mjs` | routing and the sign view (a link): wallet signing, carried signature, Submit now |
+| `decode.mjs` | fragment decode, full re-derivation, rendering, share encode/decode, carried-share check |
 | `xdr-lite.mjs` | the XDR reader/writer |
+| `actions.mjs` | the pinned emergency allow-list (accounts, signers, pools, pause rules, assets, RPCs) |
+| `build.mjs` | builds bundles, signed auth and fragments (mirrors `smart_account.py`) |
+| `rpc.mjs` | RPC reads, enforcing simulation, send and confirm |
+| `wallets.mjs` | the Freighter extension and Freighter Mobile as one wallet interface |
+| `flows.mjs` | the console's flows, DOM-free (the page and the rehearsal driver run the same code) |
+| `builder.mjs` | the console's DOM |
+| `dom.mjs` | shared DOM helpers |
 | `vendor/` | freighter-api 6.0.1, @walletconnect/universal-provider 2.26.0, qrcode 1.5.4, their four esm.sh node polyfills, @noble/ed25519 3.2.0, `SHA256SUMS` |
-| `test/` | bun tests and the generated golden vectors |
+| `test/` | bun tests, the generated golden vectors, and the manual testnet driver |
 
 Run the tests: `bun test` in this directory.
 

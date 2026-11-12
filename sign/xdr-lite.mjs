@@ -1,5 +1,6 @@
 // Minimal, self-contained XDR reader/writer for exactly what this page needs: a Soroban
-// authorization entry, and the HashIdPreimage that signs it. No dependency, no network.
+// authorization entry, the HashIdPreimage that signs it, and the writers the emergency console uses to
+// build new bundles, signed entries and a transaction envelope. No dependency, no network.
 //
 // Why not a full Stellar SDK: @stellar/stellar-base 15.0.0 predates CAP-71 (no address-V2
 // credentials, no with-address preimage), and @stellar/stellar-sdk 17.4.0 ships a brand-new union API
@@ -8,7 +9,9 @@
 // tool's own output in sign/test/.
 //
 // The payload binding deliberately re-uses the ORIGINAL BYTES of the entry's root invocation: nothing
-// here re-serialises an SCVal tree, so a decoding bug can never change what gets hashed.
+// here re-serialises an SCVal tree to bind a payload, so a decoding bug can never change what gets
+// hashed. The writers below are used only to build NEW bundles and signatures; every one of them is
+// byte-checked against the Python tool in sign/test/builder.test.mjs.
 
 const ENVELOPE_SOROBAN_AUTHORIZATION = 9;
 const ENVELOPE_SOROBAN_AUTHORIZATION_WITH_ADDRESS = 10;
@@ -274,7 +277,9 @@ export function readEntry(b64) {
   const address = scAddress(r);
   const nonce = r.i64();
   const expiry = r.u32();
+  const sigStart = r.i;
   const signature = readScVal(r);
+  const sigEnd = r.i;
   const invocation = readInvocation(r);
   if (r.i !== bytes.length) throw new Error('trailing bytes in the authorization entry');
   return {
@@ -285,6 +290,9 @@ export function readEntry(b64) {
     signature,
     invocation,
     invocationRaw: invocation.raw,
+    raw: bytes,
+    sigStart,
+    sigEnd,
   };
 }
 
@@ -324,6 +332,142 @@ export function preimageBytes(entry, networkId) {
   if (withAddress) out.push(...scAddressFromStrkey(entry.address));
   out.push(...entry.invocationRaw);
   return new Uint8Array(out);
+}
+
+// ---- writers (emergency console) --------------------------------------------------------------
+const words = (n) => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+
+function padded(bytes) {
+  const out = [...words(bytes.length), ...bytes];
+  while (out.length % 4) out.push(0);
+  return out;
+}
+
+function u64Bytes(v) {
+  const u = BigInt.asUintN(64, BigInt(v));
+  return [...words(Number(u >> 32n)), ...words(Number(u & 0xffffffffn))];
+}
+
+function u128Bytes(v) {
+  const u = BigInt.asUintN(128, BigInt(v));
+  return [...u64Bytes(u >> 64n), ...u64Bytes(u & ((1n << 64n) - 1n))];
+}
+
+/** SCVal -> XDR bytes (plain array), the inverse of readScVal. vec/map arms are optional pointers: the
+ *  presence word is ALWAYS 1, even for an empty vector, followed by the element count. */
+export function encodeScVal(v) {
+  switch (v.type) {
+    case SCV.BOOL: return [...words(0), ...words(v.value ? 1 : 0)];
+    case SCV.VOID: return [...words(1)];
+    case SCV.U32: return [...words(3), ...words(v.value >>> 0)];
+    case SCV.I32: return [...words(4), ...words(v.value >>> 0)];
+    case SCV.U64: case SCV.I64: return [...words(v.type), ...u64Bytes(v.value)];
+    case SCV.U128: case SCV.I128: return [...words(v.type), ...u128Bytes(v.value)];
+    case SCV.BYTES: return [...words(13), ...padded([...v.value])];
+    case SCV.STRING: case SCV.SYMBOL:
+      return [...words(v.type), ...padded([...new TextEncoder().encode(v.value)])];
+    case SCV.VEC:
+      return [...words(16), ...words(1), ...words(v.value.length), ...v.value.flatMap(encodeScVal)];
+    case SCV.MAP:
+      return [...words(17), ...words(1), ...words(v.value.length),
+        ...v.value.flatMap(([k, val]) => [...encodeScVal(k), ...encodeScVal(val)])];
+    case SCV.ADDRESS: return [...words(18), ...scAddressFromStrkey(v.value.strkey)];
+    default: throw new Error('encoder does not implement SCVal type ' + v.type);
+  }
+}
+
+/** InvokeContractArgs: contract address, function symbol, argument vector. */
+export function invokeArgsBytes(contract, fn, args) {
+  return new Uint8Array([
+    ...scAddressFromStrkey(contract), ...padded([...new TextEncoder().encode(fn)]),
+    ...words(args.length), ...args.flatMap(encodeScVal)]);
+}
+
+/** HostFunction INVOKE_CONTRACT. */
+export function hostFunctionBytes(invokeArgs) {
+  return new Uint8Array([...words(0), ...invokeArgs]);
+}
+
+/** SorobanAuthorizedInvocation: a contract function and no sub-invocations. */
+export function rootInvocationBytes(invokeArgs) {
+  return new Uint8Array([...words(0), ...invokeArgs, ...words(0)]);
+}
+
+/** Unsigned address-credential entry (signature void). Only ADDRESS_V2 is built. */
+export function addressEntryBytes({ credType, address, nonce, expiry, invocation }) {
+  if (credType !== 'address_v2') throw new Error('only address_v2 entries are built here');
+  const out = [];
+  writeU32(out, CRED_ADDRESS_V2);
+  out.push(...scAddressFromStrkey(address));
+  writeI64(out, BigInt(nonce));
+  writeU32(out, expiry);
+  writeU32(out, SCV.VOID);
+  out.push(...invocation);
+  return new Uint8Array(out);
+}
+
+/** SOROBAN_CREDENTIALS_SOURCE_ACCOUNT entry: the transaction's source account authorizes it. */
+export function sourceAccountEntryBytes(invocation) {
+  return new Uint8Array([...words(CRED_SOURCE_ACCOUNT), ...invocation]);
+}
+
+/** The same entry with its (void) signature replaced; refuses an entry that is already signed. */
+export function withSignature(entryBytes, sigScValBytes) {
+  const e = readEntry(bytesToBase64(entryBytes));
+  if (e.signature.type !== SCV.VOID) throw new Error('the entry already carries a signature');
+  return new Uint8Array([...e.raw.subarray(0, e.sigStart), ...sigScValBytes, ...e.raw.subarray(e.sigEnd)]);
+}
+
+const ENVELOPE_TYPE_TX = 2;
+const OP_INVOKE_HOST_FUNCTION = 24;
+const PRECOND_TIME = 1;
+
+/** Transaction (not envelope): one InvokeHostFunction op, time bounds only, no memo. */
+export function transactionBytes({ source, fee, seq, minTime = 0, maxTime, hostFunction, auth, sorobanData = null }) {
+  const out = [];
+  writeU32(out, 0);                                    // MuxedAccount KEY_TYPE_ED25519
+  out.push(...scAddressFromStrkey(source).subarray(8)); // raw ed25519 key
+  writeU32(out, fee);
+  writeI64(out, BigInt(seq));
+  writeU32(out, PRECOND_TIME);
+  out.push(...u64Bytes(minTime), ...u64Bytes(maxTime));
+  writeU32(out, 0);                                    // MEMO_NONE
+  writeU32(out, 1);                                    // one operation
+  writeU32(out, 0);                                    // no operation source
+  writeU32(out, OP_INVOKE_HOST_FUNCTION);
+  out.push(...hostFunction);
+  writeU32(out, auth.length);
+  for (const e of auth) out.push(...e);
+  if (sorobanData) { writeU32(out, 1); out.push(...sorobanData); } else writeU32(out, 0);
+  return new Uint8Array(out);
+}
+
+/** TransactionEnvelope ENVELOPE_TYPE_TX; `signatures` are `{hint: 4 bytes, sig: 64 bytes}`. */
+export function envelopeBytes(tx, signatures = []) {
+  const out = [];
+  writeU32(out, ENVELOPE_TYPE_TX);
+  out.push(...tx);
+  writeU32(out, signatures.length);
+  for (const { hint, sig } of signatures) out.push(...hint, ...words(sig.length), ...sig);
+  return new Uint8Array(out);
+}
+
+/** Sequence number out of a getLedgerEntries ACCOUNT `LedgerEntryData` (type, account id, balance, seq). */
+export function accountSeqFromEntryData(b64) {
+  const r = new Reader(base64ToBytes(b64));
+  if (r.u32() !== 0) throw new Error('not an account ledger entry');
+  r.need(44);
+  r.i += 44;                                            // account id (36) + balance (8)
+  return r.i64();
+}
+
+/** A base64 SCVal (an RPC `results[].xdr`) read as one value, with no trailing bytes. */
+export function readScValB64(b64) {
+  const bytes = base64ToBytes(b64);
+  const r = new Reader(bytes);
+  const v = readScVal(r);
+  if (r.i !== bytes.length) throw new Error('trailing bytes after the SCVal');
+  return v;
 }
 
 // ---- base64 ------------------------------------------------------------------------------------
