@@ -10,6 +10,7 @@
 // different payload.
 // ============================================================================================
 import * as xdr from './xdr-lite.mjs';
+import { EMERGENCY } from './actions.mjs';
 
 export const PINNED = {
   testnet: 'Test SDF Network ; September 2015',
@@ -22,7 +23,8 @@ export const CHAINS = { testnet: 'stellar:testnet', mainnet: 'stellar:pubnet' };
 export const KNOWN_ACCOUNTS = {
   mainnet: ['CCDZKWLV6JWM4V3WPMJHXTSLWG5IDQ5S3K7BI3AH7MBCRQCPCT3EJ2AI'],
   testnet: ['CAUO3A7E4W6KVOJ3FHQVUSRRDZQCVW4TKP7D7M2PP3PO2EY734SJE73P',
-            'CCSLQYY74HV7OOER5ENLTP7CO6M7QJU6LWURLXRPFYBNZBTKNGMQQLRH'],
+            'CCSLQYY74HV7OOER5ENLTP7CO6M7QJU6LWURLXRPFYBNZBTKNGMQQLRH',
+            'CDX7TQTXLTOPW7U33PQ2LA4435OI3PBNX2MKD433IJWLBD4NYHPJLHJR'],
 };
 // The page signs nothing that stays usable for longer than this (the CLI default is the same).
 export const MAX_DAYS = 2;
@@ -185,7 +187,16 @@ export async function derive(bundle, { signer, network: expectNetwork, now } = {
   const ruleIds = (bundle.context_rule_ids || []).map(Number);
   need(Array.isArray(ruleIds) && ruleIds.length === 1,
     'this page only signs authorizations with exactly one auth context (the account’s Default rule).');
-  need(ruleIds[0] === 0, 'the bundle selects a context rule other than 0 — refusing.');
+  if (ruleIds[0] !== 0) {
+    // Only a pinned pause rule, calling set_status(2) on its own pool: the rule's own policy enforces the
+    // same thing on-chain; the page refuses anything else before a wallet is involved.
+    const pinned = EMERGENCY[netName];
+    const pool = pinned && pinned.account === account && pinned.pools.find((p) => p.pauseRule === ruleIds[0]);
+    const inv = acct.invocation.function;
+    need(pool && inv.contract === pool.id && inv.name === 'set_status' && inv.args.length === 1
+      && inv.args[0].type === xdr.SCV.U32 && inv.args[0].value === 2,
+    'this page only signs rule 0, or a pinned pause rule calling set_status(2) on its own pool — refusing.');
+  }
 
   const networkId = await sha256(new TextEncoder().encode(bundle.network.passphrase));
   // The ACCOUNT entry's preimage digest is the `signature_payload` that ends up inside __check_auth —
@@ -311,8 +322,7 @@ export function decodeShare(code) {
     throw new Refuse('that signed share is not readable — ask for it again.');
   }
   need(body && body.v === 1, 'unsupported share version');
-  need(/^[A-Z2-7]{56}$/.test(String(body.account || '').slice(1)) && String(body.account).startsWith('C'),
-    'the share names no contract account');
+  need(/^C[A-Z2-7]{55}$/.test(String(body.account || '')), 'the share names no contract account');
   need(/^G[A-Z2-7]{55}$/.test(String(body.signer || '')), 'the share names no account signer');
   need(/^[0-9a-f]{64}$/.test(String(body.payload || '')), 'the share has no payload digest');
   need(Number.isInteger(body.expiry) && body.expiry > 0, 'the share has no expiry');
@@ -338,6 +348,24 @@ export async function verifySignature(signerG, digest, signatureB64, ed) {
   }
   need(ok, `the signature does not verify against ${signerG} for this payload — nothing was signed.`);
   return sig;
+}
+
+/**
+ * A `&p=pss1.…` share carried in a link: another signer's signature over THIS bundle. Everything it claims is
+ * checked against what the page derived itself, and the signature is verified against that signer's own entry.
+ */
+export async function verifyCarriedShare(bundle, derived, code, ed, now) {
+  const share = decodeShare(code);
+  need(share.network === derived.network, 'the carried signature is for another network.');
+  need(share.account === derived.account, 'the carried signature is for another account.');
+  need(share.expiry === derived.expiry, 'the carried signature has a different expiry than this link.');
+  need(share.payload === derived.payloadHex, 'the carried signature was made for a different signature payload — refusing.');
+  need((bundle.signers || []).includes(share.signer), `the carried signature is from ${share.signer}, who is not a signer of this bundle.`);
+  need(share.signer !== derived.signer,
+    `this link already carries a signature from ${share.signer}, the account you selected — open the link made for you.`);
+  const other = await derive(bundle, { signer: share.signer, now });
+  await verifySignature(share.signer, other.signerDigest, share.sig, ed);
+  return share;
 }
 
 /** G… strkey -> 32 raw bytes (version byte and CRC checked). */

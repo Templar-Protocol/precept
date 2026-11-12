@@ -1,10 +1,9 @@
 // Differential test: 120 randomised SCVal trees generated in Python must decode to the same bytes and
-// the same words in the page. `scval-encode.mjs` is test-only: the page never writes an SCVal, but
-// round-tripping proves the reader advances exactly like the Python encoder.
+// the same words in the page, and re-encode (xdr-lite.mjs:encodeScVal, the writer the emergency console
+// builds bundles with) to the same bytes: that proves the reader advances exactly like the Python encoder.
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as xdr from '../xdr-lite.mjs';
-import { encodeScVal } from './scval-encode.mjs';
 
 const { seed, cases } = JSON.parse(readFileSync(new URL('./random_scvals.json', import.meta.url), 'utf8'));
 
@@ -16,7 +15,7 @@ describe(`differential SCVal corpus (seed ${seed})`, () => {
       const value = xdr.readScVal(r);
       expect(r.offset).toBe(bytes.length);                 // no trailing bytes
       expect(xdr.renderScVal(value)).toBe(c.describe);      // same words as the Python tool
-      expect(xdr.hex(new Uint8Array(encodeScVal(value)))).toBe(xdr.hex(bytes)); // same bytes
+      expect(xdr.hex(new Uint8Array(xdr.encodeScVal(value)))).toBe(xdr.hex(bytes)); // same bytes
     });
   }
 
