@@ -20,11 +20,7 @@ const GOV = EMERGENCY.mainnet.governance;
 const ME = 'GBJFHU35WHKY24GGBY6R4PTEHLMURSQEVTP2TUX5O45XYGG5DI6YS2QV';
 
 const bundleCases = builder.cases.filter((c) => c.bundle);
-const callFor = (c) => ({
-  'solo.on_ice': b.onIceCall(c.inputs.pool),
-  'pair.active': b.activeCall(c.inputs.pool),
-  'pair.on_ice_rule0': b.onIceCall(c.inputs.pool),
-})[c.name];
+const callFor = (c) => (c.name === 'pair.active' ? b.activeCall : b.onIceCall)(c.inputs.pool);
 
 describe('builder vectors: bundles and signed auth', () => {
   for (const c of bundleCases) {
@@ -115,9 +111,22 @@ describe('derive: pinned pause rules', () => {
     latestLedger: d.LEDGER_ANCHORS.mainnet[0] + 1000, expiryLedgers: ledgers,
   });
 
-  test('set_status(2) on pause rule 1 is accepted', async () => {
-    const got = await d.derive(copy(), { signer: ME, now });
-    expect(got.payloadHex).toMatch(/^[0-9a-f]{64}$/);
+  test('set_status(2) on each pinned pause rule is accepted (the committed vectors)', async () => {
+    for (const [name, pool] of [['solo.on_ice', EMERGENCY.mainnet.pools[0]], ['solo.on_ice_dejaaa', EMERGENCY.mainnet.pools[1]]]) {
+      const c = byName[name];
+      expect(c.inputs.pool).toBe(pool.id);
+      expect(c.inputs.rule_id).toBe(pool.pauseRule);
+      const got = await d.derive(JSON.parse(JSON.stringify(c.bundle)), { signer: ME, now });
+      expect(got.payloadHex).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+
+  test("each pool's address through the other pool's rule is refused", async () => {
+    const [xlm, dejaaa] = EMERGENCY.mainnet.pools;
+    for (const [pool, rule] of [[xlm, dejaaa.pauseRule], [dejaaa, xlm.pauseRule]]) {
+      const bad = await rebuild(b.onIceCall(pool.id), rule);
+      await expect(d.derive(bad, { signer: ME, now })).rejects.toThrow(/only signs rule 0/);
+    }
   });
 
   test('set_status(0) through rule 1 is refused', async () => {
