@@ -2,6 +2,7 @@
 // signTransaction(envelopeB64) -> signedEnvelopeB64, close() }. Every flow (sign view and builder) uses
 // these; nothing else in the page talks to Freighter.
 import { CHAINS, PINNED, Refuse, requireSameAddress, wcStorageKeys } from './decode.mjs';
+import { el } from './dom.mjs';
 
 // Public WalletConnect client id (not a secret). Without it the mobile path is disabled with a
 // message; the extension path needs nothing.
@@ -9,7 +10,34 @@ export const WC_PROJECT_ID = '18de83305a3f84d31fc856839867319f';
 // Must be exactly the origin allow-listed in WalletConnect Cloud.
 const PAGE_ORIGIN = 'https://templar-protocol.github.io';
 
+// Varial (Freighter Mobile's new name) on the same phone as this page. The WalletConnect registry lists the
+// app's link as `freighterwallet://wc-redirect`; this is the URL AppKit builds from it. The app pairs with any
+// URL containing that prefix plus a `uri=` parameter, and the bare form just brings the app to the front.
+const VARIAL_APP = 'freighterwallet://wc-redirect/';
+export const varialPairLink = (wcUri) => `${VARIAL_APP}wc?uri=${encodeURIComponent(wcUri)}`;
+
 const reason = (e) => (e && e.message ? e.message : String(e));
+
+/** The QR for a second device, plus the two ways to pair from this phone: the deep link, and the raw
+ *  `wc:` URI to paste into Varial's scanner (the app's documented path for mobile browsers). */
+function pairingBox(QR, uri) {
+  const canvas = el('canvas');
+  QR.toCanvas(canvas, uri, { width: 320 }).catch(() => {});
+  const raw = el('input', { readOnly: true, value: uri, hidden: true, size: 40 });
+  const copy = el('button', { type: 'button', textContent: 'Copy connection link' });
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(uri);
+      copy.textContent = 'Copied — paste it in Varial’s QR scanner';
+    } catch {
+      raw.hidden = false;
+      raw.select();
+    }
+  });
+  return el('div', {}, canvas,
+    el('p', {}, 'On this phone: ', el('a', { href: varialPairLink(uri), textContent: 'Open in Varial' }), ' ', copy),
+    raw);
+}
 
 /** Freighter browser extension. `address` is the account the extension currently exposes. */
 export async function extensionWallet(network) {
@@ -65,18 +93,16 @@ export async function mobileWallet(network, onQr) {
       projectId: WC_PROJECT_ID,
       metadata: { name: 'Precept admin signing', description: 'Sign admin actions', url: PAGE_ORIGIN, icons: [] },
     });
-    provider.on('display_uri', (uri) => {
-      const canvas = document.createElement('canvas');
-      QR.toCanvas(canvas, uri, { width: 320 }).catch(() => {});
-      onQr(canvas);
-    });
+    provider.on('display_uri', (uri) => onQr(pairingBox(QR, uri),
+      'scan this QR code with Varial (Freighter Mobile), or use the buttons below it on this phone'));
     const chain = CHAINS[network];
     const session = await provider.connect({
       namespaces: {
         stellar: { methods: ['stellar_signAuthEntry', 'stellar_signXDR'], chains: [chain], events: ['accountsChanged'] },
       },
     });
-    onQr(null);
+    // Requests now wait in the app; on a phone the browser is in front, so offer the way back.
+    onQr(el('p', {}, el('a', { href: VARIAL_APP, textContent: 'Open Varial to approve' }), ' (on this phone)'));
     const account = ((session || provider.session || {}).namespaces || {}).stellar?.accounts?.[0];
     const address = account ? account.split(':')[2] : null;   // "stellar:pubnet:G…"
     return {

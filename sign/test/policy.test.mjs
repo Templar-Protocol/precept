@@ -5,6 +5,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as d from '../decode.mjs';
 import * as xdr from '../xdr-lite.mjs';
+import { varialPairLink } from '../wallets.mjs';
 
 const { vectors } = JSON.parse(readFileSync(new URL('./vectors.json', import.meta.url), 'utf8'));
 const testnetVec = vectors.find((v) => v.network === 'testnet' && v.credentials_type === 'address_v2');
@@ -98,6 +99,18 @@ describe('WalletConnect storage', () => {
   test('an empty store is harmless', () => {
     expect(d.wcStorageKeys([])).toEqual([]);
     expect(d.wcStorageKeys(undefined)).toEqual([]);
+  });
+});
+
+describe('Varial deep link', () => {
+  test('the app recovers the exact pairing URI', () => {
+    // A real-shaped v2 URI: its `&`, `=` and `@` must survive. The parse below is Varial's own
+    // (stellar/freighter-mobile 1c321b2, src/hooks/useWalletKitEventsManager.ts onDeepLink).
+    const uri = 'wc:7f6e5d4c@2?relay-protocol=irn&symKey=0123abcd&expiryTimestamp=1790000000';
+    const link = varialPairLink(uri);
+    expect(link.includes('freighterwallet://wc-redirect')).toBe(true);
+    const param = new URL(link).search.split('uri=')[1];
+    expect(decodeURIComponent(param)).toBe(uri);
   });
 });
 
