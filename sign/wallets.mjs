@@ -19,13 +19,20 @@ export const varialPairLink = (wcUri) => `${VARIAL_APP}wc?uri=${encodeURICompone
 const reason = (e) => (e && e.message ? e.message : String(e));
 
 /** The QR for a second device, plus the two ways to pair from this phone: the deep link, and the raw
- *  `wc:` URI to paste into Varial's scanner (the app's documented path for mobile browsers). */
+ *  `wc:` URI to paste into Varial's scanner (the app's documented path for mobile browsers). Either one
+ *  means the wallet is on this device, so it also records the deep-link choice: after sending a request,
+ *  the vendored WalletConnect client opens that link (bare `…/wc?requestId=…`, which only brings Varial to
+ *  the front) when the page has focus. close() clears the key with the rest of the session. */
 function pairingBox(QR, uri) {
+  const sameDevice = () => {
+    try { localStorage.setItem('WALLETCONNECT_DEEPLINK_CHOICE', JSON.stringify({ href: VARIAL_APP, name: 'Varial' })); } catch { /* ignore */ }
+  };
   const canvas = el('canvas');
   QR.toCanvas(canvas, uri, { width: 320 }).catch(() => {});
   const raw = el('input', { readOnly: true, value: uri, hidden: true, size: 40 });
   const copy = el('button', { type: 'button', textContent: 'Copy connection link' });
   copy.addEventListener('click', async () => {
+    sameDevice();
     try {
       await navigator.clipboard.writeText(uri);
       copy.textContent = 'Copied — paste it in Varial’s QR scanner';
@@ -34,9 +41,9 @@ function pairingBox(QR, uri) {
       raw.select();
     }
   });
-  return el('div', {}, canvas,
-    el('p', {}, 'On this phone: ', el('a', { href: varialPairLink(uri), textContent: 'Open in Varial' }), ' ', copy),
-    raw);
+  const open = el('a', { href: varialPairLink(uri), textContent: 'Open in Varial' });
+  open.addEventListener('click', sameDevice);
+  return el('div', {}, canvas, el('p', {}, 'On this phone: ', open, ' ', copy), raw);
 }
 
 /** Freighter browser extension. `address` is the account the extension currently exposes. */

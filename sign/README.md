@@ -28,8 +28,9 @@ every value from the XDR itself, shows the action in plain words, and hands the 
 scan its own screen, so under the QR the page offers **Open in Varial**, a deep link
 (`freighterwallet://wc-redirect/wc?uri=…`, the form AppKit builds from Varial's WalletConnect registry
 entry), and **Copy connection link**, which copies the raw `wc:` URI to paste into Varial's QR-scanner
-input (Varial's documented path for mobile browsers). Once connected, **Open Varial to approve** brings
-the app back to the front for the signing request. Revealing the pairing URI exposes no more than the
+input (Varial's documented path for mobile browsers). Either one also records Varial as this device's
+wallet, so once connected the WalletConnect client opens Varial by itself for each signing request;
+**Open Varial to approve** stays on the page as the manual fallback. Revealing the pairing URI exposes no more than the
 QR does: whoever holds it could answer as the wallet, but the page verifies every returned signature
 against the signer's own `G` address, so a forged reply cannot produce a usable share.
 
