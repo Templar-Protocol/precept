@@ -114,9 +114,9 @@ async function signWith(openWallet) {
   }
 }
 
-const showQr = (canvas) => {
-  $('qr').replaceChildren(...(canvas ? [canvas] : []));
-  if (canvas) status('scan this QR code with Freighter Mobile');
+const showQr = (node, msg) => {
+  $('qr').replaceChildren(...(node ? [node] : []));
+  if (msg) status(msg);
 };
 
 $('ext').addEventListener('click', () => signWith(() => {

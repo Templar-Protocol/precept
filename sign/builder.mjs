@@ -34,9 +34,9 @@ async function closeWallet() {
   await refreshMe();
 }
 
-const showQr = (canvas) => {
-  $('b-qr').replaceChildren(...(canvas ? [canvas] : []));
-  if (canvas) status('scan this QR code with Freighter Mobile');
+const showQr = (node, msg) => {
+  $('b-qr').replaceChildren(...(node ? [node] : []));
+  if (msg) status(msg);
 };
 
 async function connect(open) {

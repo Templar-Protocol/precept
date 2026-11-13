@@ -24,6 +24,15 @@ every value from the XDR itself, shows the action in plain words, and hands the 
 (extension or mobile QR). It answers with a short code, `pss1.…`, to send back. The proposer runs
 `submit --bundle <signed files> --share pss1.…`.
 
+**Signing on the phone that holds the wallet.** Freighter Mobile is now called Varial. A phone can't
+scan its own screen, so under the QR the page offers **Open in Varial**, a deep link
+(`freighterwallet://wc-redirect/wc?uri=…`, the form AppKit builds from Varial's WalletConnect registry
+entry), and **Copy connection link**, which copies the raw `wc:` URI to paste into Varial's QR-scanner
+input (Varial's documented path for mobile browsers). Once connected, **Open Varial to approve** brings
+the app back to the front for the signing request. Revealing the pairing URI exposes no more than the
+QR does: whoever holds it could answer as the wallet, but the page verifies every returned signature
+against the signer's own `G` address, so a forged reply cannot produce a usable share.
+
 ## What the signer must check
 
 Three things, in this order:
