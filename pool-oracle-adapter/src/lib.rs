@@ -1,4 +1,7 @@
 #![no_std]
+// UNAUDITED: the `dangerous-eager-refresh` feature (refresh-on-read in
+// `lastprice`) is not part of the Guardian-reviewed adapter. Only the default
+// build, with the feature off, is the audited artifact.
 // Soroban contract entry points require `env: Env` and `Address` by value;
 // every `#[contractimpl]` method in this crate is an ABI entry point.
 #![allow(clippy::needless_pass_by_value)]
@@ -189,9 +192,10 @@ impl PriceFeedTrait for PoolOracleAdapter {
     fn lastprice(env: Env, asset: Asset) -> Option<PriceData> {
         let config = active_config(&env)?;
         let parent = ProxyOracleClient::new(&env, &config.parent_oracle);
-        // DANGEROUS, see README: refresh the parent so the read below serves a price
-        // pulled in this transaction. The outcome is ignored on purpose: a failed or
-        // blocked refresh leaves a failed cache, so `aggregated_latest` returns None.
+        // DANGEROUS and UNAUDITED, see README: refresh the parent so the read below
+        // serves a price pulled in this transaction. The outcome is ignored on purpose:
+        // a failed or blocked refresh leaves a failed cache, so `aggregated_latest`
+        // returns None.
         #[cfg(feature = "dangerous-eager-refresh")]
         let _ =
             parent::ParentMaintenanceClient::new(&env, &config.parent_oracle).try_refresh(&asset);

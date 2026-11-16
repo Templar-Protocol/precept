@@ -1,7 +1,9 @@
 #![no_std]
 // Soroban contract entry points take `env: Env` and arguments by value.
 #![allow(clippy::needless_pass_by_value)]
-//! LOSSY, unaudited SEP-40 passthrough that serves another SEP-40 oracle's
+//! UNAUDITED: no auditor has reviewed this contract.
+//!
+//! LOSSY SEP-40 passthrough that serves another SEP-40 oracle's
 //! prices at 7 decimals, the precision a Precept pool requires. Every read is
 //! forwarded live to the source; nothing is cached, so no keeper is involved.
 //! See README.md before deploying.
