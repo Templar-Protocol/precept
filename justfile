@@ -19,6 +19,7 @@ build:
     cargo rustc --locked --manifest-path=pool-factory/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
     cargo rustc --locked --manifest-path=backstop/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
     cargo rustc --locked --manifest-path=pool/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
+    cargo rustc --locked --manifest-path=sep40-rescale-adapter/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
     # stellar-access (OpenZeppelin Ownable) turns on soroban-sdk's spec-shaking v2,
     # which only the Stellar CLI's build can link; same output path as cargo rustc.
     stellar contract build --locked --package oracle-tripper
@@ -41,6 +42,9 @@ build:
     stellar contract optimize \
         --wasm target/wasm32v1-none/release/oracle_tripper.wasm \
         --wasm-out target/wasm32v1-none/optimized/oracle_tripper.wasm
+    stellar contract optimize \
+        --wasm target/wasm32v1-none/release/sep40_rescale_adapter.wasm \
+        --wasm-out target/wasm32v1-none/optimized/sep40_rescale_adapter.wasm
     stellar contract optimize \
         --wasm target/wasm32v1-none/release/pool_pause_policy.wasm \
         --wasm-out target/wasm32v1-none/optimized/pool_pause_policy.wasm

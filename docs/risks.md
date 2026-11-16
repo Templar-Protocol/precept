@@ -113,6 +113,11 @@ is not the audited artifact, no market in the registry uses it, and its trade-of
 stop actions at the first read, refresh cost paid by users) are listed in
 [pool-oracle-adapter/README.md](https://github.com/Templar-Protocol/precept/blob/main/pool-oracle-adapter/README.md).
 
+A second unaudited contract, `sep40-rescale-adapter`, forwards every read live to any SEP-40 oracle and rescales its
+prices to the 7 decimals a pool requires, truncating when it scales down. It has no breakers, median or age limit of
+its own, so a pool behind it is protected only by its source and the pool's 24-hour check. No market in the registry
+uses it; see [sep40-rescale-adapter/README.md](https://github.com/Templar-Protocol/precept/blob/main/sep40-rescale-adapter/README.md).
+
 ## The levers that exist
 
 ### Pool admin

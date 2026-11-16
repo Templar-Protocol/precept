@@ -11,6 +11,7 @@ members = [
     "pool-factory",
     "pool-oracle-adapter",
     "oracle-tripper",
+    "sep40-rescale-adapter",
     "test-suites"
 ]
 
