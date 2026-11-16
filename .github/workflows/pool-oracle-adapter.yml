@@ -80,6 +80,14 @@ jobs:
         run: |
           echo "c5e1f21099f532b84d02571e24d196fbdb76e77286e973239dc47ed926f368c2  target/wasm32v1-none/release-soroban-checked/pool_oracle_adapter.optimized.wasm" | sha256sum -c -
 
+      - name: Run the DANGEROUS eager variant gate
+        # Feature `dangerous-eager-refresh` (see pool-oracle-adapter/README.md).
+        # Builds into target/eager after the pin above has been checked, so the
+        # audited artifact is never overwritten. No pin: this variant is unaudited.
+        env:
+          STELLAR_BIN: stellar
+        run: just eager-ready
+
       - name: Assert one SDK graph in the lock
         run: |
           python3 - <<'EOF'

@@ -107,6 +107,12 @@ Consequences to price honestly:
 * The proxy has a price only if something has refreshed it. `refresh` is permissionless, and so is keeping the
   contract's ledger entry alive, so an unattended oracle eventually stops answering.
 
+The adapter source also has an unaudited opt-in build, `dangerous-eager-refresh`, in which `lastprice` first calls the
+proxy's permissionless `refresh`, so each priced action pulls its own price and no keeper is needed for freshness. It
+is not the audited artifact, no market in the registry uses it, and its trade-offs (reads that write, outages that
+stop actions at the first read, refresh cost paid by users) are listed in
+[pool-oracle-adapter/README.md](https://github.com/Templar-Protocol/precept/blob/main/pool-oracle-adapter/README.md).
+
 ## The levers that exist
 
 ### Pool admin

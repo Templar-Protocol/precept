@@ -189,6 +189,12 @@ impl PriceFeedTrait for PoolOracleAdapter {
     fn lastprice(env: Env, asset: Asset) -> Option<PriceData> {
         let config = active_config(&env)?;
         let parent = ProxyOracleClient::new(&env, &config.parent_oracle);
+        // DANGEROUS, see README: refresh the parent so the read below serves a price
+        // pulled in this transaction. The outcome is ignored on purpose: a failed or
+        // blocked refresh leaves a failed cache, so `aggregated_latest` returns None.
+        #[cfg(feature = "dangerous-eager-refresh")]
+        let _ =
+            parent::ParentMaintenanceClient::new(&env, &config.parent_oracle).try_refresh(&asset);
         let price = parent.try_aggregated_latest(&asset).ok()?.ok()??;
         // Guardian L-05: rounding down to the bucket start would hide a parent price
         // published after the current ledger from the pool's own future-dated check.
