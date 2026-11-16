@@ -28,14 +28,20 @@ decide every price, and a blocked or failed refresh makes `lastprice` return
 
 Why it is dangerous:
 
-- **Reads write.** Any `lastprice` call inside a transaction rewrites the
-  parent's cache and breaker history. Breakers sample only when someone acts,
-  so rate-of-change breakers see sparse, demand-driven history.
-- **Outages bite at once.** A refresh that fails replaces even a still fresh
-  cached price, and now every priced action refreshes, so a source outage
-  stops priced actions at the first read instead of at the next keeper run or
-  when the cache ages out. A source whose ledger entries are archived traps
-  below the parent's `try_` calls and reverts the whole user transaction.
+- **Reads write, but a pool keeps only the successes.** A `lastprice` call
+  inside a transaction rewrites the parent's cache and breaker state. A pool
+  traps when it gets `None`, which reverts the whole transaction, so a blocked
+  or failed refresh made through a pool never persists: the cache keeps its
+  last accepted price and a breaker that tripped does not stay tripped. Every
+  later action re-runs the refresh and fails again while the cause lasts, and
+  the trip clears by itself once sources recover. Only a direct `refresh` call
+  (a keeper, or anyone) persists a failure. Breakers also sample only when an
+  action succeeds, so rate-of-change breakers see sparse, demand-driven history.
+- **Outages bite at once.** A still fresh cached price no longer covers a
+  source outage: each priced action refreshes, fails, and reverts, instead of
+  being served from the cache until the next keeper run or `max_age_secs`. A
+  source whose ledger entries are archived traps below the parent's `try_`
+  calls with the same result.
 - **Users pay for it.** Each priced reserve costs a refresh (three source views
   per source plus a cache write) inside the user's transaction, up to
   `max_positions` of them. Size source sets with the transaction budget in mind.

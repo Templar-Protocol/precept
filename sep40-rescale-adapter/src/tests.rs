@@ -161,6 +161,7 @@ fn reads_forward_live_through_aliases_at_seven_decimals() {
             [quote(10_202_019, 200), quote(10_202_019, 300)]
         ))
     );
+    assert_eq!(f.adapter.prices(&f.token, &0), None);
 
     // Decimals are read on every call, never cached.
     f.source.set_decimals(&6);

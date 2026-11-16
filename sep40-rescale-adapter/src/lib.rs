@@ -19,7 +19,6 @@ const TTL_THRESHOLD: u32 = 30 * DAY_LEDGERS;
 const TTL_EXTEND_TO: u32 = 60 * DAY_LEDGERS;
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The SEP-40 oracle every read is forwarded to.
     pub source: Address,
@@ -82,7 +81,8 @@ impl PriceFeedTrait for Sep40RescaleAdapter {
         rescale(price, decimals)
     }
 
-    /// All or nothing: one unrepresentable record fails the whole read.
+    /// All or nothing: one unrepresentable record fails the whole read, and an
+    /// empty history is `None`, as in `pool-oracle-adapter`.
     fn prices(env: Env, asset: Asset, records: u32) -> Option<Vec<PriceData>> {
         let (source, asset) = route(&env, asset);
         let decimals = source.try_decimals().ok()?.ok()?;
@@ -91,7 +91,7 @@ impl PriceFeedTrait for Sep40RescaleAdapter {
         for price in history.iter() {
             out.push_back(rescale(price, decimals)?);
         }
-        Some(out)
+        (!out.is_empty()).then_some(out)
     }
 
     fn lastprice(env: Env, asset: Asset) -> Option<PriceData> {

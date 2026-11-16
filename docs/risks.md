@@ -110,7 +110,7 @@ Consequences to price honestly:
 The adapter source also has an unaudited opt-in build, `dangerous-eager-refresh`, in which `lastprice` first calls the
 proxy's permissionless `refresh`, so each priced action pulls its own price and no keeper is needed for freshness. It
 is not the audited artifact, no market in the registry uses it, and its trade-offs (reads that write, outages that
-stop actions at the first read, refresh cost paid by users) are listed in
+stop actions at the first read, breaker trips that do not persist through a pool, refresh cost paid by users) are listed in
 [pool-oracle-adapter/README.md](https://github.com/Templar-Protocol/precept/blob/main/pool-oracle-adapter/README.md).
 
 A second unaudited contract, `sep40-rescale-adapter`, forwards every read live to any SEP-40 oracle and rescales its
