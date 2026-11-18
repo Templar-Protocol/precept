@@ -1,0 +1,19 @@
+[package]
+name = "sep40-rescale-adapter"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+license = "MIT"
+
+[lib]
+name = "sep40_rescale_adapter"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+# SEP-40 types with Debug/PartialEq; same rev as pool-oracle-adapter, already locked.
+templar-proxy-oracle-soroban-common = { git = "https://github.com/Templar-Protocol/contracts", rev = "6477b1d7ef0e17ed4ba6e6fcfa9493d049cca4eb" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

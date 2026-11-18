@@ -74,3 +74,22 @@ audit-ready: preflight fmt clippy test-native build optimize test-optimized-wasm
         echo "ARTIFACT: $a size=$(stat -c%s "$a") sha256=$(sha256sum "$a" | cut -d' ' -f1)"
     done
     echo "PASS: pool-oracle-adapter audit-ready"
+
+# DANGEROUS refresh-on-read variant (feature `dangerous-eager-refresh`, see README).
+# Builds into target/eager so it can never overwrite the audited artifact above, and
+# checks it exports the same frozen ABI within the same size cap.
+eager       := "target/eager/wasm32v1-none/release-soroban-checked/pool_oracle_adapter.wasm"
+eager-opt   := "target/eager/wasm32v1-none/release-soroban-checked/pool_oracle_adapter.optimized.wasm"
+
+eager-ready: preflight
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pool-adapter-env cargo clippy --locked --all-targets --features dangerous-eager-refresh -- -D warnings
+    pool-adapter-env cargo test --locked --features dangerous-eager-refresh
+    CARGO_TARGET_DIR="{{dir}}/target/eager" pool-adapter-env "{{stellar}}" contract build --locked --profile release-soroban-checked --package pool-oracle-adapter --features dangerous-eager-refresh
+    pool-adapter-env "{{stellar}}" contract optimize --wasm "{{eager}}" --wasm-out "{{eager-opt}}"
+    python3 scripts/check_spec.py "{{stellar}}" "{{eager-opt}}"
+    n=$(stat -c%s "{{eager-opt}}")
+    (( n > 0 && n <= 32768 )) || { echo "FAIL: eager optimized WASM is $n bytes, cap 32768" >&2; exit 1; }
+    echo "ARTIFACT (DANGEROUS eager): {{dir}}/{{eager-opt}} size=$n sha256=$(sha256sum "{{eager-opt}}" | cut -d' ' -f1)"
+    echo "PASS: pool-oracle-adapter eager-ready"

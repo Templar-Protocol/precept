@@ -904,4 +904,67 @@ mod real_parent {
         assert_eq!(adapter.prices(&a, &32), Some(accepted_history));
         assert_quote(&env, &adapter, &b, 2_000_000_000, 140);
     }
+
+    /// The default build serves only what a keeper refreshed. The eager build's
+    /// `lastprice` refreshes the parent first, so a new source price is served with
+    /// no keeper at all, while the runtime's breakers and fail-closed refresh still
+    /// decide what comes back.
+    #[test]
+    fn lastprice_refreshes_the_parent_only_in_the_eager_build() {
+        let eager = cfg!(feature = "dangerous-eager-refresh");
+        let env = environment();
+        let owner = Address::generate(&env);
+        let base = Asset::Other(Symbol::new(&env, "USD"));
+        let a = Asset::Stellar(Address::generate(&env));
+        let sources = [(); 3].map(|()| SourceClient::new(&env, &env.register(Source, (&base,))));
+        let parent_id = env.register(SorobanProxyOracle, (&owner, &base));
+        let parent = SorobanProxyOracleClient::new(&env, &parent_id);
+        let set_prices = |price: Option<PriceData>| {
+            for source in &sources {
+                source.set_price(&a, &price);
+            }
+        };
+        set_prices(Some(projected(1_000_000_000, 100)));
+        let mut configs = Vec::new(&env);
+        for source in &sources {
+            configs.push_back(SourceConfig {
+                oracle: source.address.clone(),
+                asset: a.clone(),
+            });
+        }
+        parent.set_proxy(
+            &a,
+            &ProxyConfig {
+                sources: configs,
+                min_sources: 3,
+                max_age_secs: Some(30),
+                max_clock_drift_secs: Some(5),
+            },
+        );
+        let adapter_id = env.register(
+            PoolOracleAdapter,
+            (&owner, &parent_id, &8_u32, &10_u32, &base),
+        );
+        let adapter = PoolOracleAdapterClient::new(&env, &adapter_id);
+
+        // Nobody has called `refresh`.
+        let first = eager.then(|| projected(1_000_000_000, 100));
+        assert_eq!(adapter.lastprice(&a), first);
+        assert_eq!(parent.get_cached(&a).is_some(), eager);
+
+        env.ledger().with_mut(|ledger| ledger.timestamp = 140);
+        set_prices(Some(projected(1_100_000_000, 140)));
+        let second = eager.then(|| projected(1_100_000_000, 140));
+        assert_eq!(adapter.lastprice(&a), second);
+
+        // A manual trip blocks the refresh, and untripping serves again.
+        parent.set_manual_trip(&a, &true, &None);
+        assert_eq!(adapter.lastprice(&a), None);
+        parent.set_manual_trip(&a, &false, &None);
+        assert_eq!(adapter.lastprice(&a), second);
+
+        // A failed refresh closes the read instead of serving the last good price.
+        set_prices(None);
+        assert_eq!(adapter.lastprice(&a), None);
+    }
 }

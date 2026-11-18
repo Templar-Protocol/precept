@@ -21,6 +21,10 @@ templar-proxy-oracle-soroban-contract = { git = "https://github.com/Templar-Prot
 [features]
 testutils = ["soroban-sdk/testutils"]
 wasm-smoke = []
+# DANGEROUS: `lastprice` calls the parent's permissionless `refresh` first, so every
+# priced pool action pulls its own price and no keeper is needed for freshness.
+# Builds a different artifact from the audited one; see README before deploying.
+dangerous-eager-refresh = []
 
 [[test]]
 name = "optimized_wasm"
