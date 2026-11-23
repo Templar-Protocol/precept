@@ -1569,6 +1569,27 @@ fn market_deploy_real(
             wasm_dir,
         },
     )?;
+    // Printed before the plan, so a reviewer sees how old each feed is.
+    for feed in deployer.chainlink_feeds() {
+        if robot.robot {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "chainlink_feed",
+                    "reserve": feed.reserve,
+                    "pair": feed.pair,
+                    "round_timestamp": feed.round_timestamp,
+                    "age_secs": feed.age_secs,
+                    "max_age_secs": feed.max_age_secs,
+                })
+            );
+        } else {
+            say(format!(
+                "chainlink feed {}: {} round {} is {}s old (max {}s)",
+                feed.reserve, feed.pair, feed.round_timestamp, feed.age_secs, feed.max_age_secs
+            ));
+        }
+    }
     // The operator authorizes the whole graph, so the run states it before
     // its first confirmation rather than leaving the scope inferred.
     say(format!(

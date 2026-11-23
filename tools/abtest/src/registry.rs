@@ -406,6 +406,28 @@ pub(crate) fn market_records(
                 None,
             ));
         }
+        // The Chainlink adapter this run deployed, mapped and handed over:
+        // filed under the code it uploaded, with the runtime it prices and
+        // the upstream proxy it reads. No `admin`: the adapter's owner is the
+        // pool's oracle administrator, which the pool row already names.
+        if let Some(adapter) = real.and_then(|real| real.chainlink_source.as_ref()) {
+            let mut refs = json!({"proxy_runtime": runtime});
+            if let Some(proxy) = real.and_then(|real| real.chainlink_proxy.as_deref()) {
+                refs["feed_proxy"] = json!(proxy);
+            }
+            rows.push(contract(
+                &network,
+                adapter.as_str(),
+                "chainlink_source",
+                deployment,
+                when,
+                Some(digest(crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE)?),
+                refs,
+                None,
+                None,
+                None,
+            ));
+        }
     } else {
         let source = digest("source")?;
         for id in &manifest.oracle.sources {
@@ -1416,6 +1438,73 @@ mod tests {
         assert_eq!(
             row["refs"]["proxy_runtime"],
             serde_json::to_value(&real_manifest().oracle.runtime).expect("runtime as json")
+        );
+    }
+
+    const CHAINLINK_ADAPTER: &str = "CBUF6IADAWPWIDWRTHJNINKXHG2UTIQ6TU2F2HRAXWAI7OT3KJPKK6O4";
+    const CHAINLINK_PROXY: &str = "CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ";
+
+    /// The same real market, with the Chainlink adapter this run deployed.
+    fn chainlink_manifest() -> MarketManifest {
+        let mut value = serde_json::to_value(real_manifest()).unwrap();
+        value["real"]["chainlink_source"] = json!(CHAINLINK_ADAPTER);
+        value["real"]["chainlink_proxy"] = json!(CHAINLINK_PROXY);
+        serde_json::from_value(value).expect("chainlink market manifest")
+    }
+
+    /// A chainlink run files its adapter as `chainlink_source`, under the code
+    /// it uploaded, with the runtime it prices and the proxy it reads — and no
+    /// `admin`, because the adapter's owner is the pool's oracle
+    /// administrator, which the pool row already names.
+    #[test]
+    fn a_real_market_chainlink_source_is_a_chainlink_source_row_with_our_digest() {
+        let plan = with_artifact(
+            &real_plan(),
+            crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE,
+            &"cd".repeat(32),
+        );
+        let rows = market_records(&chainlink_manifest(), &plan, "market-live-20261027", "2026-10-27")
+            .expect("chainlink market records");
+        let sources: Vec<&Value> =
+            rows.iter().filter(|row| row["role"] == "chainlink_source").collect();
+        assert_eq!(sources.len(), 1, "one adapter, one row: {sources:?}");
+        let row = sources[0];
+        assert_eq!(row["id"], json!(CHAINLINK_ADAPTER));
+        assert_eq!(row["wasm_hash"], json!("cd".repeat(32)), "the code this run uploaded");
+        assert_eq!(row["refs"]["feed_proxy"], json!(CHAINLINK_PROXY));
+        assert_eq!(
+            row["refs"]["proxy_runtime"],
+            serde_json::to_value(&chainlink_manifest().oracle.runtime).expect("runtime as json")
+        );
+        assert!(
+            row.get("admin").is_none(),
+            "the adapter's owner is the pool's oracle administrator: {row}"
+        );
+        // The adapter's code is filed from the launch profile's own tuple.
+        let code = rows
+            .iter()
+            .find(|row| {
+                row["kind"] == "wasm"
+                    && row["artifact"] == json!(crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE)
+            })
+            .expect("the adapter's wasm row");
+        assert_eq!(code["version"], json!("unreleased"));
+    }
+
+    /// A market that deploys no adapter files neither row.
+    #[test]
+    fn a_market_without_chainlink_records_no_chainlink_code() {
+        let rows = real_rows();
+        assert!(
+            !rows.iter().any(|row| row["role"] == "chainlink_source"),
+            "a market with no chainlink source files no adapter: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| {
+                row["kind"] == "wasm"
+                    && row["artifact"] == json!(crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE)
+            }),
+            "and no adapter code: {rows:?}"
         );
     }
 

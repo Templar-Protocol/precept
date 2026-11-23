@@ -1107,7 +1107,7 @@ impl SideHooks for MarketHooks<'_> {
 /// Wall-clock seconds for the per-asset publication timestamp argument (the
 /// mock publisher requires it); the proxy's own freshness filters are the
 /// enforcement truth, so no local clock arithmetic gates anything.
-fn now_epoch_secs() -> u64 {
+pub(crate) fn now_epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

@@ -998,13 +998,21 @@ pub const MARKET_ARTIFACT_ROLES: [&str; 10] = [
 /// market that declares Lazer sources. Not part of the lab stack's role set.
 pub const MARKET_LAZER_SOURCE_ROLE: &str = "lazer-source";
 
+/// The artifact role of the Chainlink Data Feeds adapter a real market
+/// deploys when it declares a `chainlink` source. Pinned only by such a
+/// market: the code is third-party and not live on every network yet.
+pub const MARKET_CHAINLINK_SOURCE_ROLE: &str = "chainlink-sep40-proxy";
+
 /// The roles a real market uploads its own bytes for: its pool stack, its
 /// price adapter, and the proxy stack it configures. Comet and the emitter are
 /// shared production contracts already live on every network — pinned by hash,
 /// never uploaded — and the mock token/publisher roles do not exist here: a
 /// real market's legs are classic assets and its prices come from Lazer or a
-/// third-party SEP-40 contract. Mainnet upload fees are ~1.5 XLM per KB, so
-/// nothing outside this list is ever submitted.
+/// third-party SEP-40 contract. Two further roles are conditional: a market
+/// that declares Lazer sources pins `lazer-source`, and one that declares a
+/// `chainlink` source pins `chainlink-sep40-proxy`. Mainnet upload fees are
+/// ~1.5 XLM per KB, so nothing outside this list and those two conditional
+/// roles is ever submitted.
 pub const MARKET_REAL_ARTIFACT_ROLES: [&str; 6] = [
     "pool",
     "backstop",
@@ -1050,6 +1058,11 @@ fn positive_i128(value: &str, name: &str) -> anyhow::Result<()> {
 pub enum ArtifactRole {
     Adapter,
     Backstop,
+    /// The Chainlink Data Feeds adapter a `chainlink` market deploys. Pinned
+    /// only by a config that declares such a source, because the code is not
+    /// live on every network yet.
+    #[serde(rename = "chainlink-sep40-proxy")]
+    ChainlinkSep40,
     Comet,
     Emitter,
     Factory,
@@ -1069,6 +1082,7 @@ impl std::borrow::Borrow<str> for ArtifactRole {
         match self {
             Self::Adapter => "adapter",
             Self::Backstop => "backstop",
+            Self::ChainlinkSep40 => "chainlink-sep40-proxy",
             Self::Comet => "comet",
             Self::Emitter => "emitter",
             Self::Factory => "factory",
@@ -1098,6 +1112,7 @@ impl std::str::FromStr for ArtifactRole {
         [
             Self::Adapter,
             Self::Backstop,
+            Self::ChainlinkSep40,
             Self::Comet,
             Self::Emitter,
             Self::Factory,
@@ -1503,6 +1518,11 @@ pub enum SourceKind {
     /// deployed or reconfigured by this tool.
     #[serde(rename = "sep40")]
     Sep40,
+    /// A Chainlink Data Feeds adapter this run deploys, maps and hands over:
+    /// one `DataFeedsSep40Proxy` per pool, owned by the pool's oracle admin.
+    /// The feed is named by its Chainlink data id and the pair it must report.
+    #[serde(rename = "chainlink")]
+    Chainlink,
 }
 
 /// One source of one reserve's price feed. Sources are per reserve because each
@@ -1527,6 +1547,16 @@ pub struct OracleSource {
     /// `{"Other": "USD"}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset: Option<serde_json::Value>,
+    /// `Chainlink`: the feed's data id, 64 lowercase hex characters. The
+    /// adapter is asked for this id and the runtime keys the source by the
+    /// reserve's own asset, so the id never becomes an asset key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_id: Option<String>,
+    /// `Chainlink`: the pair the feed must report, `"<BASE>/USD"`. Preflight
+    /// asks the upstream proxy for the feed's description and refuses a
+    /// mismatch before any send, so a typo cannot map the wrong feed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair: Option<String>,
 }
 
 /// One reserve of a real market: a real asset, the complete `ReserveConfig`
@@ -1611,6 +1641,25 @@ pub struct PoolSpec {
     /// clear its breakers, cache and history, so the run never does it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// The Chainlink Data Feeds proxy this market's adapter reads: the
+    /// upstream contract that answers `description` and `latest_round` for a
+    /// feed's data id. Named once for the market, as the pool config names
+    /// it, and required whenever any reserve quotes a `chainlink` source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chainlink_proxy: Option<String>,
+}
+
+impl PoolSpec {
+    /// Whether any reserve of this pool declares a source of `kind`. The
+    /// conditional artifact roles and the deployer's shape both ask this
+    /// question, and both must answer it the same way.
+    #[must_use]
+    pub fn declares(&self, kind: SourceKind) -> bool {
+        self.reserves
+            .iter()
+            .flat_map(|reserve| reserve.sources.iter())
+            .any(|source| source.kind == kind)
+    }
 }
 
 /// The pool configuration a market run borrows from the registry's config
@@ -1667,6 +1716,10 @@ struct RegistryOracle {
     /// verifies it instead of deploying one.
     #[serde(default)]
     runtime: Option<String>,
+    /// The Chainlink Data Feeds proxy every `chainlink` source of this pool
+    /// reads. Present whenever any source is a Chainlink feed.
+    #[serde(default)]
+    chainlink_proxy: Option<String>,
     /// One block per reserve label. Quorum and freshness are per asset because
     /// the sources behind different assets are pushed on different cadences.
     assets: BTreeMap<String, RegistryAssetOracle>,
@@ -1697,6 +1750,10 @@ struct RegistrySource {
     contract: Option<String>,
     #[serde(default)]
     asset: Option<serde_json::Value>,
+    #[serde(default)]
+    data_id: Option<String>,
+    #[serde(default)]
+    pair: Option<String>,
 }
 
 /// One entry of the registry config's `reserves` array: the asset, its label,
@@ -1781,14 +1838,16 @@ impl RegistryPoolConfig {
             self.network
         );
         anyhow::ensure!(!self.name.trim().is_empty(), "the pool config has no name");
-        let (verifier, runtime, declared_assets, oracle_admin) = match self.oracle {
+        let (verifier, runtime, chainlink_proxy, declared_assets, oracle_admin) = match self.oracle
+        {
             Some(oracle) => (
                 oracle.lazer_verifier,
                 oracle.runtime,
+                oracle.chainlink_proxy,
                 oracle.assets,
                 oracle.admin,
             ),
-            None => (None, None, BTreeMap::new(), None),
+            None => (None, None, None, BTreeMap::new(), None),
         };
         let _ = (self.proposed_by, self.notes);
         let mut reserves = self
@@ -1812,7 +1871,7 @@ impl RegistryPoolConfig {
                 .sources
                 .clone()
                 .into_iter()
-                .map(|s| s.into_source())
+                .map(|s| s.into_source(&reserve.label))
                 .collect::<anyhow::Result<Vec<_>>>()?;
         }
         let declared_labels: std::collections::BTreeSet<&String> = declared_assets.keys().collect();
@@ -1835,6 +1894,7 @@ impl RegistryPoolConfig {
             lazer_verifier: verifier,
             adapter: self.pool.oracle,
             runtime,
+            chainlink_proxy,
         })
     }
 }
@@ -1843,13 +1903,17 @@ impl RegistrySource {
     /// The market's own source shape, so one validator governs sources whether
     /// they came from the pool config or from a market config that declares
     /// its `[pool]` inline.
-    fn into_source(self) -> anyhow::Result<OracleSource> {
+    fn into_source(self, reserve: &str) -> anyhow::Result<OracleSource> {
         let kind = match self.kind.as_str() {
             "lazer" => SourceKind::Lazer,
             "sep40" => SourceKind::Sep40,
             "mock" => SourceKind::Mock,
+            "chainlink" => SourceKind::Chainlink,
             other => {
-                bail!("an oracle source kind must be lazer, sep40 or mock, not '{other}'")
+                bail!(
+                    "reserve '{reserve}' names an oracle source kind that must be lazer, \
+                     sep40, chainlink or mock, not '{other}'"
+                )
             }
         };
         Ok(OracleSource {
@@ -1857,6 +1921,8 @@ impl RegistrySource {
             feed_id: self.feed_id.map(|id| id.to_string()),
             contract: self.contract,
             asset: self.asset,
+            data_id: self.data_id,
+            pair: self.pair,
         })
     }
 }
@@ -1885,9 +1951,10 @@ pub struct LaunchArtifact {
 }
 
 /// The code every launch pool runs: the hardened v0.1.1 pool stack, the
-/// v0.1.4/v0.1.5 proxy stack, the v0.1.0 Lazer source, and the two shared
-/// production contracts the backstop and the shim are built on.
-pub const MARKET_LAUNCH_PROFILE: [LaunchArtifact; 9] = [
+/// v0.1.4/v0.1.5 proxy stack, the v0.1.0 Lazer source, the Chainlink Data
+/// Feeds adapter a `chainlink` market deploys, and the two shared production
+/// contracts the backstop and the shim are built on.
+pub const MARKET_LAUNCH_PROFILE: [LaunchArtifact; 10] = [
     LaunchArtifact {
         role: "pool",
         wasm_hash: "acf7a128074d4d9c34b4ac4e8ab46cc1148eb353eb3908ad0faf922851728086",
@@ -1932,6 +1999,16 @@ pub const MARKET_LAUNCH_PROFILE: [LaunchArtifact; 9] = [
             "soroban-lazer-source",
             "v0.1.0",
             r#"{"asset":"templar_proxy_oracle_soroban_pyth_lazer_source_contract-0.1.0.wasm","repo":"Templar-Protocol/contracts","tag":"templar-proxy-oracle-soroban-pyth-lazer-source-contract-v0.1.0"}"#,
+        ),
+    },
+    LaunchArtifact {
+        role: MARKET_CHAINLINK_SOURCE_ROLE,
+        wasm_hash: "bdb671cd3b860dfe9676f892164e87a6c1e40588b6d50a58b5aa4d76c5005913",
+        asset: "data_feeds_sep40_proxy.wasm",
+        registry: (
+            "chainlink-sep40-proxy",
+            "unreleased",
+            r#"{"note":"Chainlink testnet sample adapter CCT6EH2KKCGJCXAF2AXM7P7LLNRRBOKRVB7BJNLX2EBPYHAXGZPSY3F2; audited commit not yet confirmed"}"#,
         ),
     },
     LaunchArtifact {
@@ -2133,6 +2210,12 @@ impl MarketConfig {
                 if pool.runtime.is_some() {
                     pins.remove(&ArtifactRole::ProxyRuntime);
                     pins.remove(&ArtifactRole::ProxyGovernance);
+                }
+                // The Chainlink adapter is third-party code that is not live
+                // on every network yet, so only a market that deploys one
+                // pins it: every other config keeps the digest it always had.
+                if !pool.declares(SourceKind::Chainlink) {
+                    pins.remove(&ArtifactRole::ChainlinkSep40);
                 }
                 pins
             },
@@ -2475,9 +2558,13 @@ impl MarketConfig {
         );
         // A source belongs to the reserve whose price it quotes, and a quorum
         // is only a quorum across distinct contracts — so every check below is
-        // per reserve, including the distinctness set.
+        // per reserve, including the distinctness set. A Chainlink feed is
+        // named by its data id, which is unique across the whole market: two
+        // reserves quoting one feed would be one price wearing two names.
+        let mut chainlink_feeds = std::collections::BTreeSet::new();
         for reserve in &pool.reserves {
             let mut external = std::collections::BTreeSet::new();
+            let mut chainlink_here = 0usize;
             // Each reserve configures exactly one ProxyConfig on the runtime,
             // so its quorum and freshness are its own: Lazer is pushed every
             // minute, a RedStone wrapper on a 12-hour heartbeat. A quorum of
@@ -2522,11 +2609,17 @@ impl MarketConfig {
                     // A synthetic source quotes a price the operator chose. It
                     // is a testnet instrument: on mainnet it would stand in for
                     // real data behind a pool that lends real value.
-                    SourceKind::Mock => anyhow::ensure!(
-                        network == MarketNetwork::Testnet,
-                        "{at} is a synthetic mock source; a mainnet market's sources are \
-                         Lazer instances and existing SEP-40 contracts"
-                    ),
+                    SourceKind::Mock => {
+                        anyhow::ensure!(
+                            network == MarketNetwork::Testnet,
+                            "{at} is a synthetic mock source; a mainnet market's sources are \
+                             Lazer instances and existing SEP-40 contracts"
+                        );
+                        anyhow::ensure!(
+                            source.data_id.is_none() && source.pair.is_none(),
+                            "{at} is a synthetic mock source; it takes no data id or pair"
+                        );
+                    }
                     SourceKind::Lazer => {
                         let verifier = pool.lazer_verifier.as_deref().ok_or_else(|| {
                             anyhow!("{at} binds no verifier: the pool config names no \
@@ -2545,8 +2638,12 @@ impl MarketConfig {
                             "{at} must name its Lazer feed id in base 10"
                         );
                         anyhow::ensure!(
-                            source.contract.is_none() && source.asset.is_none(),
-                            "{at} deploys its own contract; it takes no address or asset key"
+                            source.contract.is_none()
+                                && source.asset.is_none()
+                                && source.data_id.is_none()
+                                && source.pair.is_none(),
+                            "{at} deploys its own contract; it takes no address, asset key, \
+                             data id or pair"
                         );
                     }
                     SourceKind::Sep40 => {
@@ -2563,10 +2660,81 @@ impl MarketConfig {
                              quorum of one contract is not a quorum"
                         );
                         anyhow::ensure!(
-                            source.asset.is_some() && source.feed_id.is_none(),
+                            source.asset.is_some()
+                                && source.feed_id.is_none()
+                                && source.data_id.is_none()
+                                && source.pair.is_none(),
                             "{at} is referenced, never configured: it names its asset key and \
-                             no feed id"
+                             no feed id, data id or pair"
                         );
+                    }
+                    SourceKind::Chainlink => {
+                        chainlink_here += 1;
+                        anyhow::ensure!(
+                            chainlink_here == 1,
+                            "{at} is a second Chainlink source of this reserve; one adapter \
+                             serves one feed per asset"
+                        );
+                        // D3: the adapter is this run's own contract, wired
+                        // into a runtime this run deploys. A pool that shares
+                        // someone else's runtime references a Chainlink-owned
+                        // adapter as an existing SEP-40 contract instead.
+                        anyhow::ensure!(
+                            pool.runtime.is_none(),
+                            "{at} deploys an adapter this run owns, which a pool sharing an \
+                             existing runtime cannot wire; reference a Chainlink-owned adapter \
+                             with kind \"sep40\" instead"
+                        );
+                        let proxy = pool.chainlink_proxy.as_deref().ok_or_else(|| {
+                            anyhow!("{at} reads no Chainlink proxy: the pool config names no \
+                                    'chainlink_proxy'")
+                        })?;
+                        anyhow::ensure!(
+                            ContractId::from_str(proxy).is_ok(),
+                            "the pool's chainlink_proxy must be a contract id (a C-address)"
+                        );
+                        let data_id = source.data_id.as_deref().ok_or_else(|| {
+                            anyhow!("{at} is a Chainlink feed and must name its data id")
+                        })?;
+                        anyhow::ensure!(
+                            is_sha256_hex(data_id),
+                            "{at} must name its Chainlink data id as 64 lowercase hex characters"
+                        );
+                        anyhow::ensure!(
+                            chainlink_feeds.insert(data_id.to_string()),
+                            "{at} repeats a data id another reserve already quotes; one feed is \
+                             one price"
+                        );
+                        let pair = source.pair.as_deref().ok_or_else(|| {
+                            anyhow!("{at} is a Chainlink feed and must name the pair it reports")
+                        })?;
+                        anyhow::ensure!(
+                            is_usd_pair(pair),
+                            "{at} must name the pair its feed reports as \"<BASE>/USD\", not \
+                             '{pair}'"
+                        );
+                        anyhow::ensure!(
+                            source.contract.is_none()
+                                && source.asset.is_none()
+                                && source.feed_id.is_none(),
+                            "{at} deploys its own adapter; it takes no address, asset key or \
+                             feed id"
+                        );
+                        // D6: the adapter's code is third-party. Mainnet runs
+                        // only once the launch profile records the audited
+                        // commit those bytes were built from.
+                        if network == MarketNetwork::Mainnet {
+                            let entry = MARKET_LAUNCH_PROFILE
+                                .iter()
+                                .find(|a| a.role == MARKET_CHAINLINK_SOURCE_ROLE)
+                                .ok_or_else(|| {
+                                    anyhow!("the launch profile pins no Chainlink adapter")
+                                })?;
+                            anyhow::ensure!(
+                                chainlink_code_audited(entry),
+                                "Chainlink adapter code has no audited commit in the launch profile"
+                            );
+                        }
                     }
                 }
             }
@@ -2593,14 +2761,17 @@ impl MarketConfig {
         if self.pool.as_ref().is_some_and(|p| p.runtime.is_some()) {
             roles.retain(|r| !matches!(*r, "proxy-runtime" | "proxy-governance"));
         }
+        if self.pool.as_ref().is_some_and(|p| p.declares(SourceKind::Lazer)) {
+            roles.push(MARKET_LAZER_SOURCE_ROLE);
+        }
+        // The Chainlink adapter is this run's own code too, but only a market
+        // that declares such a source deploys one.
         if self
             .pool
-            .iter()
-            .flat_map(|p| p.reserves.iter())
-            .flat_map(|r| r.sources.iter())
-            .any(|s| s.kind == SourceKind::Lazer)
+            .as_ref()
+            .is_some_and(|p| p.declares(SourceKind::Chainlink))
         {
-            roles.push(MARKET_LAZER_SOURCE_ROLE);
+            roles.push(MARKET_CHAINLINK_SOURCE_ROLE);
         }
         roles.sort_unstable();
         roles
@@ -2688,6 +2859,37 @@ impl MarketConfig {
 
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A Chainlink feed's declared pair: an upper-case base symbol and the USD
+/// quote the adapter's own base is. The adapter reports `"<BASE>/USD"` from
+/// its upstream proxy, and preflight compares the two exactly.
+fn is_usd_pair(s: &str) -> bool {
+    s.strip_suffix("/USD").is_some_and(|base| {
+        !base.is_empty()
+            && base.len() <= 16
+            && base.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    })
+}
+
+/// Whether the launch profile's Chainlink entry records the audited commit
+/// its bytes were built from: a `"commit"` value of exactly 40 lowercase hex
+/// characters in the entry's registry source JSON. The entry is an argument
+/// rather than a lookup so a test can state the shape it is asking about; the
+/// profile itself is a `const` and cannot be built at test time.
+pub fn chainlink_code_audited(entry: &LaunchArtifact) -> bool {
+    let (_, _, source) = entry.registry;
+    serde_json::from_str::<serde_json::Value>(source)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("commit")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|commit| {
+                    commit.len() == 40
+                        && commit.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                })
+        })
 }
 
 /// A checksum-valid account or contract strkey — anything that can hold a role.
@@ -2818,6 +3020,16 @@ pub struct RealMarketManifest {
     /// way, and the run refuses to publish without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backstop_custodian_burn_tx: Option<crate::stellar::TxHash>,
+    /// The Chainlink Data Feeds adapter this run deployed, mapped and handed
+    /// over. Absent for a market that declares no `chainlink` source, and for
+    /// manifests written before the kind existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chainlink_source: Option<ContractId>,
+    /// The upstream Chainlink proxy that adapter reads, as the pool config
+    /// named it. Recorded beside the adapter so a reader can tell which feed
+    /// set the run's prices came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chainlink_proxy: Option<String>,
 }
 
 /// One real asset's own price stack, as configured on the runtime. Sources
@@ -4546,6 +4758,33 @@ mod market_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `data_id` and `pair` are the Chainlink source's fields. A source of
+    /// another kind that carries them is a config mistake: the values would
+    /// change the config digest without changing the deployment.
+    #[test]
+    fn a_non_chainlink_source_takes_no_data_id_or_pair() {
+        let dir = scratch("source-fields");
+        let mut sep40 = launch_pool("xlm", MAINNET_XLM, 7, 1);
+        sep40["oracle"]["assets"]["xlm"]["sources"] = serde_json::json!([{
+            "kind": "sep40", "contract": EXTERNAL_ORACLE,
+            "asset": {"Stellar": MAINNET_XLM}, "data_id": CHAINLINK_XLM_ID
+        }]);
+        let err = format!("{:#}", from_pool_file(&dir, &sep40, None).unwrap_err());
+        assert!(err.contains("no feed id, data id or pair"), "{err}");
+        let mut lazer = launch_pool("xlm", MAINNET_XLM, 7, 1);
+        lazer["oracle"]["assets"]["xlm"]["sources"] =
+            serde_json::json!([{"kind": "lazer", "feed_id": 200, "pair": "XLM/USD"}]);
+        let err = format!("{:#}", from_pool_file(&dir, &lazer, None).unwrap_err());
+        assert!(err.contains("no address, asset key, data id or pair"), "{err}");
+        let mut mock = launch_pool("xlm", MAINNET_XLM, 7, 1);
+        mock["network"] = serde_json::json!("testnet");
+        mock["oracle"]["assets"]["xlm"]["sources"] =
+            serde_json::json!([{"kind": "mock", "data_id": CHAINLINK_XLM_ID}]);
+        let err = format!("{:#}", from_pool_file(&dir, &mock, None).unwrap_err());
+        assert!(err.contains("synthetic mock source; it takes no data id or pair"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn from_pool_config_reuses_a_shared_runtime_without_pinning_proxy_code() {
         let dir = scratch("pool-runtime");
@@ -4733,6 +4972,246 @@ mod market_tests {
         let err = format!("{:#}", from_pool_file(&dir, &too_old, None).unwrap_err());
         assert!(err.contains("reserve 'xlm' sets max_age_secs 604801"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- the chainlink source kind ----------
+
+    const CHAINLINK_PROXY: &str = "CBUF6IADAWPWIDWRTHJNINKXHG2UTIQ6TU2F2HRAXWAI7OT3KJPKK6O4";
+    const CHAINLINK_USDC_ID: &str =
+        "01a80ff216000332000000000000000000000000000000000000000000000000";
+    const CHAINLINK_XLM_ID: &str =
+        "017be2f55a000332000000000000000000000000000000000000000000000000";
+
+    /// A launch pool whose every reserve quotes one Chainlink feed, in the
+    /// shape a reviewed pool config writes it.
+    fn chainlink_pool() -> serde_json::Value {
+        let mut spec = launch_pool("xlm", MAINNET_XLM, 7, 1);
+        spec["oracle"]["chainlink_proxy"] = serde_json::json!(CHAINLINK_PROXY);
+        spec["oracle"]["assets"]["usdc"] = serde_json::json!({
+            "min_sources": 1, "max_age_secs": 86_400,
+            "sources": [{"kind": "chainlink", "data_id": CHAINLINK_USDC_ID,
+                         "pair": "USDC/USD"}]
+        });
+        spec["oracle"]["assets"]["xlm"] = serde_json::json!({
+            "min_sources": 1, "max_age_secs": 86_400,
+            "sources": [{"kind": "chainlink", "data_id": CHAINLINK_XLM_ID,
+                         "pair": "XLM/USD"}]
+        });
+        spec
+    }
+
+    /// A testnet copy of the same pool: the D6 gate is mainnet's, so the
+    /// grammar tests run where a chainlink market is lawful today.
+    fn chainlink_pool_testnet() -> serde_json::Value {
+        let mut spec = chainlink_pool();
+        spec["network"] = serde_json::json!("testnet");
+        spec
+    }
+
+    #[test]
+    fn a_chainlink_source_needs_the_pools_chainlink_proxy() {
+        let dir = scratch("chainlink-proxy");
+        let mut spec = chainlink_pool_testnet();
+        spec["oracle"]
+            .as_object_mut()
+            .expect("object")
+            .remove("chainlink_proxy");
+        let err = format!("{:#}", from_pool_file(&dir, &spec, None).unwrap_err());
+        assert!(
+            err.contains("reserve 'usdc'") && err.contains("chainlink_proxy"),
+            "the refusal must name the reserve and the missing field: {err}"
+        );
+        // A proxy that is not a contract id is refused too.
+        let mut bad = chainlink_pool_testnet();
+        bad["oracle"]["chainlink_proxy"] = serde_json::json!("not-a-contract");
+        let err = format!("{:#}", from_pool_file(&dir, &bad, None).unwrap_err());
+        assert!(err.contains("chainlink_proxy must be a contract id"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chainlink_source_names_a_64_hex_data_id_and_a_usd_pair() {
+        let dir = scratch("chainlink-grammar");
+        let cfg = from_pool_file(&dir, &chainlink_pool_testnet(), None)
+            .expect("a well-formed chainlink pool loads");
+        let pool = cfg.pool.as_ref().expect("the pool is the config");
+        assert_eq!(pool.chainlink_proxy.as_deref(), Some(CHAINLINK_PROXY));
+        assert_eq!(
+            pool.reserves[0].sources[0].data_id.as_deref(),
+            Some(CHAINLINK_USDC_ID)
+        );
+        assert_eq!(pool.reserves[0].sources[0].pair.as_deref(), Some("USDC/USD"));
+        // A data id that is not 64 lowercase hex characters is refused.
+        let mut short = chainlink_pool_testnet();
+        short["oracle"]["assets"]["xlm"]["sources"][0]["data_id"] =
+            serde_json::json!("017be2f5");
+        let err = format!("{:#}", from_pool_file(&dir, &short, None).unwrap_err());
+        assert!(err.contains("64 lowercase hex characters"), "{err}");
+        // So is a pair that is not `<BASE>/USD`.
+        let mut pair = chainlink_pool_testnet();
+        pair["oracle"]["assets"]["xlm"]["sources"][0]["pair"] = serde_json::json!("XLM/EUR");
+        let err = format!("{:#}", from_pool_file(&dir, &pair, None).unwrap_err());
+        assert!(err.contains("must name the pair its feed reports"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chainlink_source_takes_no_contract_asset_or_feed_id() {
+        let dir = scratch("chainlink-fields");
+        for (field, value) in [
+            ("contract", serde_json::json!(EXTERNAL_ORACLE)),
+            ("asset", serde_json::json!({"Stellar": MAINNET_XLM})),
+            ("feed_id", serde_json::json!(7)),
+        ] {
+            let mut spec = chainlink_pool_testnet();
+            spec["oracle"]["assets"]["xlm"]["sources"][0][field] = value;
+            let err = format!("{:#}", from_pool_file(&dir, &spec, None).unwrap_err());
+            assert!(
+                err.contains("takes no address, asset key or feed id"),
+                "a chainlink source must refuse '{field}': {err}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reserve_quotes_chainlink_at_most_once_and_feeds_are_not_shared() {
+        let dir = scratch("chainlink-dupes");
+        // Two chainlink sources in one reserve: one adapter serves one feed
+        // per asset.
+        let mut twice = chainlink_pool_testnet();
+        twice["oracle"]["assets"]["xlm"]["sources"] = serde_json::json!([
+            {"kind": "chainlink", "data_id": CHAINLINK_XLM_ID, "pair": "XLM/USD"},
+            {"kind": "chainlink", "data_id": CHAINLINK_USDC_ID, "pair": "USDC/USD"}
+        ]);
+        twice["oracle"]["assets"]["xlm"]["min_sources"] = serde_json::json!(2);
+        let err = format!("{:#}", from_pool_file(&dir, &twice, None).unwrap_err());
+        assert!(err.contains("second Chainlink source of this reserve"), "{err}");
+        // One data id quoted by two reserves is one price wearing two names.
+        let mut shared = chainlink_pool_testnet();
+        shared["oracle"]["assets"]["xlm"]["sources"][0]["data_id"] =
+            serde_json::json!(CHAINLINK_USDC_ID);
+        let err = format!("{:#}", from_pool_file(&dir, &shared, None).unwrap_err());
+        assert!(err.contains("repeats a data id another reserve already quotes"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chainlink_source_is_refused_on_a_shared_runtime() {
+        let dir = scratch("chainlink-shared");
+        let mut spec = chainlink_pool_testnet();
+        spec["oracle"]["runtime"] = serde_json::json!(EXTERNAL_ORACLE);
+        let err = format!("{:#}", from_pool_file(&dir, &spec, None).unwrap_err());
+        assert!(
+            err.contains("sharing an existing runtime") && err.contains("kind \"sep40\""),
+            "the refusal must name the alternative: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mainnet_chainlink_source_is_refused_until_the_profile_names_an_audited_commit() {
+        let dir = scratch("chainlink-mainnet");
+        let err = format!("{:#}", from_pool_file(&dir, &chainlink_pool(), None).unwrap_err());
+        assert!(
+            err.contains("Chainlink adapter code has no audited commit in the launch profile"),
+            "a mainnet chainlink pool is refused until the profile records the audit: {err}"
+        );
+        // The gate is the profile entry's own provenance, and it is a
+        // function of the entry it is handed.
+        let entry = |source: &'static str| LaunchArtifact {
+            role: MARKET_CHAINLINK_SOURCE_ROLE,
+            wasm_hash: "bdb671cd3b860dfe9676f892164e87a6c1e40588b6d50a58b5aa4d76c5005913",
+            asset: "data_feeds_sep40_proxy.wasm",
+            registry: ("chainlink-sep40-proxy", "unreleased", source),
+        };
+        assert!(
+            !chainlink_code_audited(&entry(
+                r#"{"note":"audited commit not yet confirmed"}"#
+            )),
+            "a note-only entry records no commit"
+        );
+        assert!(
+            !chainlink_code_audited(&entry(r#"{"commit":"85a901e8"}"#)),
+            "a short commit is not a commit"
+        );
+        assert!(
+            !chainlink_code_audited(&entry(
+                r#"{"commit":"85A901E8B0C0D0E0F0A0B0C0D0E0F0A0B0C0D0E0"}"#
+            )),
+            "an upper-case commit is not the canonical spelling"
+        );
+        assert!(
+            chainlink_code_audited(&entry(
+                r#"{"repo":"smartcontractkit/chainlink-stellar","commit":"85a901e8b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0"}"#
+            )),
+            "a 40-hex commit is the audit record"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_chainlink_market_pins_the_chainlink_adapter_code() {
+        let dir = scratch("chainlink-pin");
+        let chainlink = from_pool_file(&dir, &chainlink_pool_testnet(), None)
+            .expect("a chainlink pool loads");
+        assert!(
+            chainlink
+                .artifacts
+                .contains_key(&ArtifactRole::ChainlinkSep40),
+            "a chainlink market pins the adapter it deploys"
+        );
+        assert!(
+            chainlink
+                .required_roles()
+                .contains(&MARKET_CHAINLINK_SOURCE_ROLE),
+            "and requires it: {:?}",
+            chainlink.required_roles()
+        );
+        let plain = from_pool_file(&dir, &launch_pool("xlm", MAINNET_XLM, 7, 2), None)
+            .expect("a Lazer pool loads");
+        assert!(
+            !plain.artifacts.contains_key(&ArtifactRole::ChainlinkSep40),
+            "a market that deploys no adapter pins none"
+        );
+        assert!(
+            !plain.required_roles().contains(&MARKET_CHAINLINK_SOURCE_ROLE),
+            "{:?}",
+            plain.required_roles()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// I1, behaviourally: every committed pool config that declares no
+    /// `chainlink` source yields artifacts without the adapter's key. Still
+    /// valid after a chainlink config is committed, because it asks each
+    /// config what it declares rather than naming a fixed list.
+    #[test]
+    fn pool_configs_without_chainlink_pin_no_chainlink_code() {
+        let configs = Path::new("../../registry/configs");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(configs).expect("the registry configs are readable") {
+            let path = entry.expect("a config entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let cfg = MarketConfig::from_pool_config(&path, None)
+                .unwrap_or_else(|e| panic!("{} must load: {e:#}", path.display()));
+            let declares_chainlink = cfg
+                .pool
+                .as_ref()
+                .is_some_and(|p| p.declares(SourceKind::Chainlink));
+            if declares_chainlink {
+                continue;
+            }
+            assert!(
+                !cfg.artifacts.contains_key(&ArtifactRole::ChainlinkSep40),
+                "{} declares no chainlink source but pins the adapter",
+                path.display()
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "the committed configs are the evidence this test reads");
     }
 
     #[test]
