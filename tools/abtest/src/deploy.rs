@@ -3291,7 +3291,15 @@ impl MarketDeployer {
             // in a data id would otherwise map the wrong feed behind a pool
             // that lends real value, and the mapping is the one thing this
             // run cannot undo without the owner's `update_feed`.
-            chainlink_feeds = self.chainlink_feed_preflight(&st, pool)?;
+            //
+            // Only the construction that freezes the plan reads them. A
+            // resume of a frozen plan must not be blocked by a Chainlink
+            // outage: the mapping it would guard is already guarded where it
+            // happens — execution reads `get_feed` before it sends, and the
+            // adapter's own `add_feed` refuses a feed it cannot read.
+            if read_deployment_plan(&self.journal.out())?.is_none() {
+                chainlink_feeds = self.chainlink_feed_preflight(pool)?;
+            }
         }
         let admin = Stellar::new(&self.ctx.admin_net(), &self.exec, Policy::Market)
             .keys_public_key(self.ctx.admin_alias())?
@@ -3399,7 +3407,6 @@ impl MarketDeployer {
     /// refuses the run rather than letting it map a feed it never read.
     fn chainlink_feed_preflight(
         &self,
-        st: &Stellar<'_, RealExecutor>,
         pool: &crate::manifest::PoolSpec,
     ) -> anyhow::Result<Vec<ChainlinkFeed>> {
         let Some(proxy) = pool.chainlink_proxy.as_deref() else {
@@ -3427,47 +3434,37 @@ impl MarketDeployer {
                 .pair
                 .as_deref()
                 .ok_or_else(|| anyhow!("reserve '{}' names no Chainlink pair", reserve.label))?;
-            let described = st
-                .try_view(
-                    proxy.as_str(),
-                    self.ctx.admin_alias(),
-                    "description",
-                    &[kv("data_id", data_id)],
+            let described = self.chainlink_view(
+                &proxy,
+                "description",
+                &[kv("data_id", data_id)],
+                &format!(
+                    "reserve '{}' names a Chainlink feed the proxy cannot describe",
+                    reserve.label
+                ),
+            )?;
+            let described = described.as_str().map(str::to_string).ok_or_else(|| {
+                anyhow!(
+                    "reserve '{}' names a Chainlink feed the proxy answered with no description; \
+                     the run is refused before any send",
+                    reserve.label
                 )
-                .ok()
-                .filter(|invocation| invocation.ok)
-                .and_then(|invocation| invocation.value)
-                .and_then(|value| value.as_str().map(str::to_string))
-                .ok_or_else(|| {
-                    anyhow!(
-                        "reserve '{}' names a Chainlink feed the proxy cannot describe; the run \
-                         is refused before any send",
-                        reserve.label
-                    )
-                })?;
+            })?;
             anyhow::ensure!(
                 described == pair,
                 "reserve '{}' declares the Chainlink pair '{pair}' but its feed reports \
                  '{described}'; the run is refused before any send",
                 reserve.label
             );
-            let round = st
-                .try_view(
-                    proxy.as_str(),
-                    self.ctx.admin_alias(),
-                    "latest_round",
-                    &[kv("data_id", data_id), kv("decimals", 18)],
-                )
-                .ok()
-                .filter(|invocation| invocation.ok)
-                .and_then(|invocation| invocation.value)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "reserve '{}' names a Chainlink feed with no readable round; the run is \
-                         refused before any send",
-                        reserve.label
-                    )
-                })?;
+            let round = self.chainlink_view(
+                &proxy,
+                "latest_round",
+                &[kv("data_id", data_id), kv("decimals", 18)],
+                &format!(
+                    "reserve '{}' names a Chainlink feed whose round could not be read",
+                    reserve.label
+                ),
+            )?;
             let round_timestamp = round
                 .get("timestamp")
                 .and_then(Value::as_u64)
@@ -3486,6 +3483,40 @@ impl MarketDeployer {
             });
         }
         Ok(feeds)
+    }
+
+    /// One read-only question to the upstream proxy, asked through the
+    /// operator's own keystore — the same seam the shared-runtime check uses,
+    /// because a view signed as the admin alias must find that alias.
+    ///
+    /// An executor failure propagates: a CLI that could not run says nothing
+    /// about the feed, and reporting it as an unreadable feed would send the
+    /// operator to the wrong place. A non-zero exit is the proxy's own
+    /// answer, so its text is named in the refusal.
+    fn chainlink_view(
+        &self,
+        proxy: &ContractId,
+        f: &str,
+        args: &[(&str, String)],
+        refusal: &str,
+    ) -> anyhow::Result<Value> {
+        let invocation = self
+            .operator_reader()
+            .try_view(proxy.as_str(), self.ctx.admin_alias(), f, args)?;
+        if !invocation.ok {
+            let reason = Safe::first_error_line(Policy::Market, &invocation.stderr).to_string();
+            let reason = if reason.trim().is_empty() {
+                "the CLI printed no diagnostic".to_string()
+            } else {
+                reason
+            };
+            anyhow::bail!(
+                "{refusal}: the {f} read failed ({reason}); the run is refused before any send"
+            );
+        }
+        invocation.value.ok_or_else(|| {
+            anyhow!("{refusal}: the {f} read answered nothing; the run is refused before any send")
+        })
     }
 
     /// The plan this run must freeze: the configuration digest, the nonce,
@@ -11974,6 +12005,16 @@ if [ "$1" = contract ] && [ "$2" = fetch ]; then
 fi
 
 if [ "$1" = contract ] && [ "$2" = invoke ]; then
+    # A view signed as an alias must find that alias in the config dir it was
+    # given: an identity registered in one keystore is not visible from
+    # another, exactly as the real CLI answers it. `owner-<alias>` arms the
+    # one directory that holds it.
+    src=$(arg --source "$@")
+    cfg=$(arg --config-dir "$@")
+    if [ -n "$src" ] && [ -f "$S/owner-$src" ] && [ "$(cat "$S/owner-$src")" != "$cfg" ]; then
+        printf 'Failed to find config identity for %s\n' "$src" >&2
+        exit 1
+    fi
     fn=
     sep=0
     for w in "$@"; do
@@ -11991,7 +12032,9 @@ if [ "$1" = contract ] && [ "$2" = invoke ]; then
     governance) abi=' __constructor active_ids cancel_proposal create_proposal execute_proposal extend_ttl get_effective_proposal_ttl get_operation_ttl get_proposal get_roles has_role list_role next_proposal_id proxy_oracle ' ;;
     runtime) abi=' __constructor accept_ownership add_breaker aggregated_history aggregated_latest configure_breakers extend_ttl get_breaker_set_view get_cached get_owner get_proxy rearm refresh registered_assets remove_breaker remove_proxy renounce_ownership set_enforced set_manual_trip set_proxy source_base transfer_ownership upgrade ' ;;
     lazer) abi=' __constructor assets base config decimals extend_ttl lastprice price prices reset_verification_epoch set_freshness set_supported_feed_ids set_verification_config stored_price supported_feed_ids update_price_feeds verification_epoch accept_ownership get_owner renounce_ownership transfer_ownership ' ;;
-    chainlink) abi=' __constructor accept_ownership add_feed base decimals get_feed get_owner get_proxy lastprice remove_feed renounce_ownership set_proxy transfer_ownership update_feed ' ;;
+    # The real adapter panics on `renounce_ownership`
+    # (`OwnershipRenunciationDisabled`), so the stand-in does not export it.
+    chainlink) abi=' __constructor accept_ownership add_feed base decimals get_feed get_owner get_proxy lastprice remove_feed set_proxy transfer_ownership update_feed ' ;;
     esac
     if [ -n "$abi" ]; then
         case "$abi" in
@@ -12788,18 +12831,26 @@ exit 1
         /// names the upstream proxy, and the stand-in answers both the
         /// proxy's `description`/`latest_round` and the adapter's own
         /// `get_proxy`/`base`/`decimals`.
-        fn with_chainlink(mut self) -> Self {
+        fn with_chainlink(self) -> Self {
+            self.with_chainlink_on(&[0, 1])
+        }
+
+        /// The same, for the reserves that quote a feed. A market may mix
+        /// source kinds, and a reserve this call does not name keeps the
+        /// sources it already had.
+        fn with_chainlink_on(mut self, indexes: &[usize]) -> Self {
             let proxy = fixture_contract(60);
             let pool = self.cfg.pool.as_mut().expect("a real market has a pool");
             pool.chainlink_proxy = Some(proxy.as_str().to_string());
-            for (index, reserve) in pool.reserves.iter_mut().enumerate() {
+            for index in indexes {
+                let reserve = &mut pool.reserves[*index];
                 reserve.sources = vec![crate::manifest::OracleSource {
                     kind: crate::manifest::SourceKind::Chainlink,
                     feed_id: None,
                     contract: None,
                     asset: None,
-                    data_id: Some(chainlink_data_id(index)),
-                    pair: Some(format!("{}/USD", ["USDC", "XLM"][index])),
+                    data_id: Some(chainlink_data_id(*index)),
+                    pair: Some(format!("{}/USD", ["USDC", "XLM"][*index])),
                 }];
             }
             // The adapter's code is this run's own, pinned like any other
@@ -12820,9 +12871,9 @@ exit 1
             // The proxy is a contract on the network, and it answers each
             // declared feed with the pair the config declares.
             self.code_at(&proxy, b"fixture chainlink proxy wasm");
-            for index in 0..2 {
-                let id = chainlink_data_id(index);
-                self.arm(&format!("description-{id}"), ["USDC/USD", "XLM/USD"][index]);
+            for index in indexes {
+                let id = chainlink_data_id(*index);
+                self.arm(&format!("description-{id}"), ["USDC/USD", "XLM/USD"][*index]);
                 self.arm(
                     &format!("round-{id}"),
                     &format!(
@@ -13457,6 +13508,11 @@ exit 1
 
     /// The adapter is deployed, its constructor's answers read back, and each
     /// reserve's feed mapped and proved by `get_feed`.
+    ///
+    /// The mapping is asserted on the `add_feed` invocation itself, not on the
+    /// cumulative call log: preflight already logged both data ids in its own
+    /// `description`/`latest_round` reads, so a substring search over the log
+    /// would pass even if the wrong feed were mapped.
     #[test]
     fn a_chainlink_adapter_is_deployed_and_each_feed_mapped() {
         let market = a_real_market_chainlink("chainlink-exec");
@@ -13471,10 +13527,21 @@ exit 1
             market.calls()
         );
         let calls = market.calls();
+        let constructor = calls
+            .lines()
+            .find(|line| line.starts_with("contract deploy"))
+            .unwrap_or_else(|| panic!("the adapter was never deployed: {calls}"));
         assert!(
-            calls.contains(&format!("--proxy {}", fixture_contract(60).as_str()))
-                && calls.contains("--base_symbol USD"),
-            "the adapter is constructed with the configured proxy and base: {calls}"
+            constructor.contains(&format!("--proxy {}", fixture_contract(60).as_str()))
+                && constructor.contains("--base_symbol USD"),
+            "the adapter is constructed with the configured proxy and base: {constructor}"
+        );
+        // The owner is the operator, who hands it to the oracle administrator
+        // at phase 11. The stand-in checks no auth, so only this assertion can
+        // see a constructor that names the wrong owner.
+        assert!(
+            constructor.contains(&format!("--owner {}", market.admin.as_str())),
+            "the adapter is constructed with the operator as its owner: {constructor}"
         );
         // The mapping coordinate, against the adapter the deploy settled.
         let (_, ev) = confirm_through_gate(
@@ -13488,9 +13555,17 @@ exit 1
             market.calls()
         );
         let calls = market.calls();
+        let mapped: Vec<&str> = calls
+            .lines()
+            .filter(|line| line.starts_with("contract invoke") && line.contains(" add_feed "))
+            .collect();
+        assert_eq!(mapped.len(), 1, "one mapping, one invocation: {calls}");
+        let asset = json!({"Stellar": market.assets[1].as_str()}).to_string();
         assert!(
-            calls.contains("add_feed") && calls.contains(&chainlink_data_id(1)),
-            "the reserve's data id is what was mapped: {calls}"
+            mapped[0].contains(&format!("--asset {asset}"))
+                && mapped[0].contains(&format!("--data_id {}", chainlink_data_id(1))),
+            "the reserve's own asset is mapped to its own data id: {}",
+            mapped[0]
         );
         market.clean();
     }
@@ -13554,6 +13629,134 @@ exit 1
         market.clean();
     }
 
+    /// A round the proxy cannot answer is refused before any send, and the
+    /// refusal names the reserve and the read that failed.
+    #[test]
+    fn an_unreadable_chainlink_round_is_refused_before_any_send() {
+        let market = a_real_market_chainlink("chainlink-round");
+        market.disarm(&format!("round-{}", chainlink_data_id(0)));
+        let refused = MarketDeployer::with_options(
+            market.cfg.clone(),
+            market.context("market-admin"),
+            market.journal(),
+            MarketDeployOptions::default(),
+        )
+        .expect("a refused preflight is a result, not a panic");
+        let Some(DeployEvent::Failed(note)) = &refused.terminal else {
+            market.clean();
+            panic!("an unreadable round is a refusal: {:?}", refused.terminal);
+        };
+        let note = note.to_string();
+        assert!(
+            note.contains("reserve 'usdc'") && note.contains("latest_round"),
+            "the refusal names the reserve and the read: {note}"
+        );
+        // The CLI's own diagnostic is named, not a claim that the feed is
+        // undescribable: the operator has to know which side failed.
+        assert!(
+            note.contains("feed not found"),
+            "the refusal carries the CLI's error text: {note}"
+        );
+        assert!(
+            real_sends(&market.calls()).is_empty(),
+            "a refused feed reached the ledger: {:?}",
+            real_sends(&market.calls())
+        );
+        market.clean();
+    }
+
+    /// The feed reads are signed as the operator's alias, so they must go
+    /// through the operator's own keystore: the run-local one never holds
+    /// that alias, and a read asked of it fails before it reaches the proxy.
+    /// The stand-in models the split the way the real CLI does — an identity
+    /// registered in one config dir is not visible from another.
+    #[test]
+    fn the_chainlink_feed_reads_use_the_operators_own_keystore() {
+        let market = a_real_market_chainlink("chainlink-keystore");
+        // The alias belongs to the operator's directory and to no other.
+        market.arm(
+            "owner-market-admin",
+            market.out.join("admin").display().to_string().as_str(),
+        );
+        let d = market.run(false);
+        assert!(
+            d.terminal.is_none(),
+            "the feed reads must find the operator's alias: {:?}",
+            d.terminal
+        );
+        assert_eq!(d.chainlink_feeds().len(), 2, "both feeds were read");
+        market.clean();
+    }
+
+    /// A resume of a frozen plan does not read the feeds again: the mapping
+    /// it would guard is guarded where it happens, and a Chainlink outage
+    /// must not block a run that already froze its plan.
+    #[test]
+    fn a_resume_of_a_frozen_plan_does_not_read_the_feeds_again() {
+        let market = a_real_market_chainlink("chainlink-resume-outage");
+        // The first construction freezes the plan and reads both feeds.
+        let first = market.run(false);
+        assert_eq!(first.chainlink_feeds().len(), 2, "the freeze reads the feeds");
+        let frozen = std::fs::read_to_string(market.out.join("deployment-plan.toml"))
+            .expect("the run froze a plan");
+        // The proxy goes away entirely: every feed read would now fail.
+        for index in 0..2 {
+            market.disarm(&format!("description-{}", chainlink_data_id(index)));
+            market.disarm(&format!("round-{}", chainlink_data_id(index)));
+        }
+        let resumed = market.run(false);
+        assert!(
+            resumed.terminal.is_none(),
+            "a resume must not be blocked by a Chainlink outage: {:?}",
+            resumed.terminal
+        );
+        assert!(
+            resumed.chainlink_feeds().is_empty(),
+            "a resume reads no feeds, so it reports none: {:?}",
+            resumed.chainlink_feeds()
+        );
+        assert_eq!(
+            std::fs::read_to_string(market.out.join("deployment-plan.toml"))
+                .expect("the plan is still there"),
+            frozen,
+            "a resume never rewrites the frozen plan"
+        );
+        market.clean();
+    }
+
+    /// A CLI that could not run is not a feed that could not be read: the
+    /// executor's failure propagates instead of being reported as an
+    /// unreadable feed, which would send the operator to the wrong place.
+    ///
+    /// Asked of the seam directly, because a CLI that cannot start fails
+    /// preflight's own version probe first — the feed read is never reached
+    /// through a construction.
+    #[test]
+    fn a_chainlink_read_whose_cli_could_not_run_propagates_the_executor_failure() {
+        let market = a_real_market_chainlink("chainlink-cli-gone");
+        let d = market.run(false);
+        std::fs::remove_file(&market.stellar).expect("the stand-in is there");
+        let proxy = fixture_contract(60);
+        let err = d
+            .chainlink_view(
+                &proxy,
+                "description",
+                &[kv("data_id", chainlink_data_id(0))],
+                "reserve 'usdc' names a Chainlink feed the proxy cannot describe",
+            )
+            .expect_err("a CLI that cannot start is an error, not an answer");
+        let note = err.to_string();
+        assert!(
+            note.contains("stellar command failed"),
+            "the executor's own failure is what propagates: {note}"
+        );
+        assert!(
+            !note.contains("cannot describe") && !note.contains("could not be read"),
+            "a CLI that could not run is not a feed that could not be read: {note}"
+        );
+        market.clean();
+    }
+
     /// The adapter goes to the oracle administrator after the Lazer sources
     /// and before governance moves.
     #[test]
@@ -13605,6 +13808,44 @@ exit 1
                 .contains(&format!("--new_owner {}", foreign.as_str())),
             "the adapter was never asked to transfer: {}",
             market.calls()
+        );
+        market.clean();
+    }
+
+    /// The order the proposal review approved, on a market that owes both
+    /// kinds of source: the pool first, then the Lazer instances, then the
+    /// Chainlink adapter, then governance. The fixture above has no Lazer
+    /// source, so only this one can see the adapter placed before them.
+    #[test]
+    fn the_chainlink_handoff_follows_the_lazer_sources_and_precedes_governance() {
+        let foreign = fixture_actor(9);
+        let mut market = a_real_market_lazer("chainlink-order").with_chainlink_on(&[1]);
+        market.arm(&format!("account-{}", foreign.as_str()), "open");
+        market
+            .cfg
+            .pool
+            .as_mut()
+            .expect("a real market has a pool")
+            .admin = foreign.as_str().to_string();
+        let slots = market.schedule(false);
+        let position = |want: &dyn Fn(&MOp) -> bool| -> usize {
+            slots
+                .iter()
+                .position(|slot| want(&slot.op))
+                .unwrap_or_else(|| panic!("the graph schedules no such coordinate: {slots:?}"))
+        };
+        let pool = position(&|op| *op == MOp::RealHandoffPool);
+        let last_lazer = slots
+            .iter()
+            .rposition(|slot| matches!(slot.op, MOp::RealHandoffLazer { .. }))
+            .unwrap_or_else(|| panic!("the graph hands a Lazer source over: {slots:?}"));
+        let chainlink = position(&|op| *op == MOp::RealHandoffChainlink);
+        let first_role = position(&|op| matches!(op, MOp::RealProposeRole { .. }));
+        assert!(
+            pool < last_lazer && last_lazer < chainlink && chainlink < first_role,
+            "the order is pool, Lazer sources, adapter, governance: \
+             pool={pool} last_lazer={last_lazer} chainlink={chainlink} \
+             first_role={first_role}\n{slots:?}"
         );
         market.clean();
     }
@@ -13751,6 +13992,152 @@ exit 1
         market.clean();
     }
 
+
+    /// A mapping's reconciliation is the adapter answering with this reserve's
+    /// data id — the same readback its execution settles on. Forcing this
+    /// branch to `true` would settle a mapping that never landed, leaving the
+    /// pool with no price source, so each of the three answers is asserted.
+    #[test]
+    fn a_resumed_run_settles_a_chainlink_mapping_only_on_its_own_data_id() {
+        let market = a_real_market_chainlink("chainlink-map-resume");
+        let adapter = fixture_contract(75);
+        let key = asset_slug(&json!({"Stellar": market.assets[1].as_str()}));
+        let d = market.run(false);
+        let slot = market.slot(&MOp::RealMapChainlink { asset: 1 });
+        let mut record = MarketCustodyRecord {
+            phase: slot.phase,
+            kind: slot.kind,
+            action: Safe::literal(slot.action),
+            network: MarketNetwork::Testnet,
+            signer: market.admin.clone(),
+            payload_digest: Sha256Hex::default(),
+            target: Some(adapter.clone()),
+            artifact_digest: None,
+            predicted: None,
+            pre_state: vec![Safe::literal("an interrupted mapping")],
+            tool_error: None,
+        };
+        record.payload_digest = custody_payload_digest(&record).expect("fixture digest");
+        let mut d = d;
+        market.arm_deployed(&mut d, [("chainlink", adapter.clone())]);
+        // Unmapped: the coordinate has not landed.
+        assert!(
+            !d.real_effect_present(&slot.op, &record).expect("the proof is readable"),
+            "an unmapped asset is not this run's mapping: {}",
+            market.calls()
+        );
+        // Mapped to another feed: someone else's mapping, never settled here.
+        market.arm(&format!("feed-{adapter}-{key}"), &chainlink_data_id(0));
+        assert!(
+            !d.real_effect_present(&slot.op, &record).expect("the proof is readable"),
+            "another feed's mapping is not this run's: {}",
+            market.calls()
+        );
+        // Mapped to this reserve's own data id: the coordinate landed.
+        market.arm(&format!("feed-{adapter}-{key}"), &chainlink_data_id(1));
+        assert!(
+            d.real_effect_present(&slot.op, &record).expect("the proof is readable"),
+            "this reserve's own data id is this run's mapping: {}",
+            market.calls()
+        );
+        market.clean();
+    }
+
+    /// A hand-off's reconciliation is the owner being the oracle
+    /// administrator, or the contract holding exactly this run's pending
+    /// transfer — the address *and* the deadline the gate froze. An intent
+    /// that carries no deadline stays unresolved rather than settling on an
+    /// address alone.
+    #[test]
+    fn a_resumed_run_settles_a_chainlink_handoff_only_on_its_own_transfer() {
+        let foreign = fixture_actor(9);
+        let mut market = a_real_market_chainlink("chainlink-handoff-resume");
+        market.arm(&format!("account-{}", foreign.as_str()), "open");
+        market
+            .cfg
+            .pool
+            .as_mut()
+            .expect("a real market has a pool")
+            .admin = foreign.as_str().to_string();
+        let adapter = fixture_contract(76);
+        let d = market.run(false);
+        let slot = market.slot(&MOp::RealHandoffChainlink);
+        let record = |deadline: Option<u32>| {
+            let mut record = MarketCustodyRecord {
+                phase: slot.phase,
+                kind: slot.kind,
+                action: Safe::literal(slot.action),
+                network: MarketNetwork::Testnet,
+                signer: market.admin.clone(),
+                payload_digest: Sha256Hex::default(),
+                target: Some(adapter.clone()),
+                artifact_digest: None,
+                predicted: None,
+                pre_state: vec![Safe::literal("an interrupted handoff")],
+                tool_error: None,
+            };
+            if let Some(deadline) = deadline {
+                record.pre_state.push(
+                    Safe::render_market_json(
+                        &json!({"pending_live_until_ledger": deadline}),
+                        256,
+                    )
+                    .expect("fixture deadline"),
+                );
+            }
+            record.payload_digest = custody_payload_digest(&record).expect("fixture digest");
+            record
+        };
+        let mut d = d;
+        market.arm_deployed(&mut d, [("chainlink", adapter.clone())]);
+        // Neither the owner nor a pending transfer: nothing landed.
+        assert!(
+            !d.real_effect_present(&slot.op, &record(Some(1_234_567)))
+                .expect("the proof is readable"),
+            "an adapter nobody transferred is not this run's handoff: {}",
+            market.calls()
+        );
+        // The owner is the oracle administrator: the transfer completed.
+        market.arm(&format!("owner-{}", adapter.as_str()), foreign.as_str());
+        assert!(
+            d.real_effect_present(&slot.op, &record(Some(1_234_567)))
+                .expect("the proof is readable"),
+            "the oracle administrator as owner is this run's handoff: {}",
+            market.calls()
+        );
+        // A pending transfer to the right address with the frozen deadline is
+        // this run's own, still waiting for the new owner to accept.
+        market.disarm(&format!("owner-{}", adapter.as_str()));
+        market.arm(
+            &format!("temp-{}", adapter.as_str()),
+            &format!(
+                "{{\"map\":[{{\"key\":{{\"symbol\":\"address\"}},\"val\":{{\"address\":\"{}\"}}}},\
+                 {{\"key\":{{\"symbol\":\"live_until_ledger\"}},\"val\":{{\"u32\":1234567}}}}]}}",
+                foreign.as_str()
+            ),
+        );
+        assert!(
+            d.real_effect_present(&slot.op, &record(Some(1_234_567)))
+                .expect("the proof is readable"),
+            "this run's own pending transfer is its handoff: {}",
+            market.calls()
+        );
+        // The same entry under a different deadline is someone else's.
+        assert!(
+            !d.real_effect_present(&slot.op, &record(Some(7_654_321)))
+                .expect("the proof is readable"),
+            "a transfer with another deadline is not this run's: {}",
+            market.calls()
+        );
+        // An intent that froze no deadline cannot tell the two apart.
+        assert!(
+            !d.real_effect_present(&slot.op, &record(None)).expect("the proof is readable"),
+            "an intent with no deadline stays unresolved: {}",
+            market.calls()
+        );
+        market.clean();
+    }
+
     /// A feed already mapped to this run's data id is not mapped twice.
     #[test]
     fn a_mapped_chainlink_feed_is_not_mapped_twice() {
@@ -13772,6 +14159,69 @@ exit 1
             !market.calls().contains("add_feed"),
             "a mapping nobody needed was made again: {}",
             market.calls()
+        );
+        market.clean();
+    }
+
+    /// A feed already mapped to a *different* data id is a refusal, not an
+    /// overwrite: the mapping is the one thing this run cannot undo without
+    /// the owner's `update_feed`, and a mapping it did not make is not its to
+    /// replace.
+    #[test]
+    fn a_chainlink_feed_mapped_to_another_data_id_is_refused() {
+        let market = a_real_market_chainlink("chainlink-foreign-map");
+        let adapter = fixture_contract(77);
+        let key = asset_slug(&json!({"Stellar": market.assets[1].as_str()}));
+        market.arm(&format!("feed-{adapter}-{key}"), &chainlink_data_id(0));
+        let mut d = market.run(false);
+        market.arm_deployed(&mut d, [("chainlink", adapter)]);
+        let refused = market.confirm(&mut d, &MOp::RealMapChainlink { asset: 1 });
+        let Err(error) = refused else {
+            market.clean();
+            panic!("a mapping to another feed settled instead of refusing");
+        };
+        let note = error.to_string();
+        assert!(
+            note.contains("reserve 'xlm' is already mapped to another Chainlink feed"),
+            "the refusal names the reserve and the conflict: {note}"
+        );
+        assert!(
+            !market.calls().contains("add_feed"),
+            "a mapping this run did not make was overwritten: {}",
+            market.calls()
+        );
+        market.clean();
+    }
+
+    /// The deploy coordinate reads the adapter's own answers back before it
+    /// settles: a contract at the predicted id that reads a different proxy
+    /// is not the adapter this market reviewed, and the coordinate refuses
+    /// rather than recording a deploy of code nobody approved.
+    #[test]
+    fn a_chainlink_adapter_reading_back_another_proxy_is_refused() {
+        let market = a_real_market_chainlink("chainlink-readback");
+        let predicted = fixture_contract(78);
+        market.arm_predict(&predicted);
+        market.arm(&format!("role-{predicted}"), "chainlink");
+        // The contract at the predicted id answers a proxy the config never
+        // named: the bytes there are not the adapter this run pinned.
+        market.arm(&format!("chainlink-proxy-{predicted}"), fixture_contract(61).as_str());
+        let mut d = market.run(false);
+        let refused = market.confirm(&mut d, &MOp::RealDeployChainlink);
+        let Err(error) = refused else {
+            market.clean();
+            panic!("an adapter reading another proxy settled instead of refusing");
+        };
+        let note = error.to_string();
+        assert!(
+            note.contains(
+                "the deployed Chainlink adapter does not read back the configured proxy"
+            ),
+            "the refusal names the readback that disagreed: {note}"
+        );
+        assert!(
+            !d.deployed.contains_key("chainlink"),
+            "a refused deploy must not record the adapter as deployed"
         );
         market.clean();
     }

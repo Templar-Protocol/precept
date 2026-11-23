@@ -1003,6 +1003,11 @@ pub const MARKET_LAZER_SOURCE_ROLE: &str = "lazer-source";
 /// market: the code is third-party and not live on every network yet.
 pub const MARKET_CHAINLINK_SOURCE_ROLE: &str = "chainlink-sep40-proxy";
 
+/// Chainlink's Data Feeds proxy on mainnet, as its Stellar documentation
+/// publishes it. Mainnet accepts only this proxy; testnet accepts any, because
+/// a rehearsal may point at a proxy the operator deployed.
+pub const CHAINLINK_MAINNET_PROXY: &str = "CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ";
+
 /// The roles a real market uploads its own bytes for: its pool stack, its
 /// price adapter, and the proxy stack it configures. Comet and the emitter are
 /// shared production contracts already live on every network — pinned by hash,
@@ -2720,24 +2725,50 @@ impl MarketConfig {
                             "{at} deploys its own adapter; it takes no address, asset key or \
                              feed id"
                         );
-                        // D6: the adapter's code is third-party. Mainnet runs
-                        // only once the launch profile records the audited
-                        // commit those bytes were built from.
+                        // D6: the adapter's code is third-party, and mainnet
+                        // reads Chainlink's own proxy and nothing else. Both
+                        // are mainnet's gates, and both are reported at once:
+                        // an operator fixing a config should not learn one
+                        // refusal per run.
                         if network == MarketNetwork::Mainnet {
-                            let entry = MARKET_LAUNCH_PROFILE
+                            let known = CHAINLINK_MAINNET_PROXY;
+                            let mut refusals: Vec<String> = Vec::new();
+                            if proxy != known {
+                                refusals.push(format!(
+                                    "oracle.chainlink_proxy {proxy} is not Chainlink's Data \
+                                     Feeds proxy for mainnet ({known})"
+                                ));
+                            }
+                            match MARKET_LAUNCH_PROFILE
                                 .iter()
                                 .find(|a| a.role == MARKET_CHAINLINK_SOURCE_ROLE)
-                                .ok_or_else(|| {
-                                    anyhow!("the launch profile pins no Chainlink adapter")
-                                })?;
-                            anyhow::ensure!(
-                                chainlink_code_audited(entry),
-                                "Chainlink adapter code has no audited commit in the launch profile"
-                            );
+                            {
+                                Some(entry) if chainlink_code_audited(entry) => {}
+                                Some(_) => refusals.push(
+                                    "Chainlink adapter code has no audited commit in the launch \
+                                     profile"
+                                        .to_string(),
+                                ),
+                                None => refusals.push(
+                                    "the launch profile pins no Chainlink adapter".to_string(),
+                                ),
+                            }
+                            anyhow::ensure!(refusals.is_empty(), "{}", refusals.join("; "));
                         }
                     }
                 }
             }
+        }
+        // The proxy is named once for the whole market, so a proxy no reserve
+        // reads is a config mistake: the run would deploy and configure an
+        // adapter for nothing. A config that does declare a chainlink source
+        // was judged by that source's own rules above, mainnet's proxy gate
+        // included.
+        if pool.chainlink_proxy.is_some() {
+            anyhow::ensure!(
+                pool.declares(SourceKind::Chainlink),
+                "oracle.chainlink_proxy is set but no reserve has a chainlink source"
+            );
         }
         Ok(())
     }
@@ -5006,6 +5037,45 @@ mod market_tests {
         let mut spec = chainlink_pool();
         spec["network"] = serde_json::json!("testnet");
         spec
+    }
+
+    /// Mainnet reads Chainlink's own proxy and nothing else: a substituted
+    /// address would be a price source the operator chose, wearing Chainlink's
+    /// name. Testnet accepts any proxy, because a rehearsal may point at one
+    /// the operator deployed.
+    #[test]
+    fn a_mainnet_chainlink_proxy_must_be_chainlinks_own() {
+        let dir = scratch("chainlink-mainnet-proxy");
+        let spec = chainlink_pool();
+        let err = format!("{:#}", from_pool_file(&dir, &spec, None).unwrap_err());
+        assert!(
+            err.contains(&format!(
+                "oracle.chainlink_proxy {CHAINLINK_PROXY} is not Chainlink's Data Feeds proxy \
+                 for mainnet ({})",
+                CHAINLINK_MAINNET_PROXY
+            )),
+            "the refusal names the address and the one mainnet accepts: {err}"
+        );
+        // The same proxy on testnet is lawful: the gate is mainnet's.
+        let testnet = chainlink_pool_testnet();
+        from_pool_file(&dir, &testnet, None)
+            .expect("a testnet rehearsal may point at a proxy the operator deployed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A proxy no reserve reads is a config mistake: the run would deploy and
+    /// configure an adapter for nothing.
+    #[test]
+    fn a_chainlink_proxy_without_a_chainlink_source_is_refused() {
+        let dir = scratch("chainlink-proxy-orphan");
+        let mut spec = launch_pool("xlm", MAINNET_XLM, 7, 2);
+        spec["oracle"]["chainlink_proxy"] = serde_json::json!(CHAINLINK_PROXY);
+        let err = format!("{:#}", from_pool_file(&dir, &spec, None).unwrap_err());
+        assert!(
+            err.contains("oracle.chainlink_proxy is set but no reserve has a chainlink source"),
+            "the refusal names the orphaned proxy: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

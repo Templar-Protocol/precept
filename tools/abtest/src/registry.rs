@@ -391,7 +391,10 @@ pub(crate) fn market_records(
     // lab's three mock sources are its own deployments, so they keep their
     // rows.
     if real.is_some() {
-        let lazer = digest("lazer-source")?;
+        // The digest is asked for only when there is a row to file: a market
+        // whose sources are all Chainlink deploys no Lazer instance, so its
+        // plan carries no `lazer-source` artifact and asking for one would
+        // refuse a run that owes nothing.
         for source in deployed_lazer_sources(manifest) {
             rows.push(contract(
                 &network,
@@ -399,7 +402,7 @@ pub(crate) fn market_records(
                 "lazer_source",
                 deployment,
                 when,
-                Some(lazer),
+                Some(digest("lazer-source")?),
                 json!({"proxy_runtime": runtime}),
                 None,
                 None,
@@ -1379,12 +1382,17 @@ mod tests {
     /// Its frozen plan: the runtime was reused, so there is no proxy-runtime
     /// or proxy-governance artifact; the sources are Lazer sources.
     fn real_plan() -> DeploymentPlan {
+        with_artifact(&real_plan_without_lazer(), "lazer-source", &format!("{:02x}", 11u8).repeat(32))
+    }
+
+    /// The same plan for a market that deployed no Lazer instance: the
+    /// `lazer-source` artifact is absent, as it is for a chainlink-only run.
+    fn real_plan_without_lazer() -> DeploymentPlan {
         let mut plan = fixture_plan();
         for role in ["proxy-runtime", "proxy-governance", "source", "token"] {
             plan.artifacts.remove(role);
         }
-        let digest = |byte: u8| format!("{byte:02x}").repeat(32);
-        with_artifact(&plan, "lazer-source", &digest(11))
+        plan
     }
 
     fn real_rows() -> Vec<Value> {
@@ -1441,7 +1449,9 @@ mod tests {
         );
     }
 
-    const CHAINLINK_ADAPTER: &str = "CBUF6IADAWPWIDWRTHJNINKXHG2UTIQ6TU2F2HRAXWAI7OT3KJPKK6O4";
+    /// A made-up contract id: the adapter is this run's own deployment, so its
+    /// address is whatever the run predicted, never a published one.
+    const CHAINLINK_ADAPTER: &str = "CB3XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XOJMC";
     const CHAINLINK_PROXY: &str = "CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ";
 
     /// The same real market, with the Chainlink adapter this run deployed.
@@ -1489,6 +1499,40 @@ mod tests {
             })
             .expect("the adapter's wasm row");
         assert_eq!(code["version"], json!("unreleased"));
+    }
+
+    /// A market whose every source is Chainlink deploys no Lazer instance, so
+    /// its frozen plan carries no `lazer-source` artifact. Filing its rows
+    /// must not ask for one: a run that owes no Lazer code is not refused for
+    /// the code it never uploaded.
+    #[test]
+    fn a_chainlink_only_market_files_its_rows_without_a_lazer_artifact() {
+        let mut value = serde_json::to_value(chainlink_manifest()).unwrap();
+        value["real"]["lazer_sources"] = json!([]);
+        value["real"]["proxies"] = json!([]);
+        let manifest: MarketManifest = serde_json::from_value(value).expect("chainlink manifest");
+        let plan = with_artifact(
+            &real_plan_without_lazer(),
+            crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE,
+            &"cd".repeat(32),
+        );
+        assert!(
+            !plan.artifacts.contains_key("lazer-source"),
+            "the fixture must model a plan with no Lazer code: {:?}",
+            plan.artifacts.keys().collect::<Vec<_>>()
+        );
+        let rows = market_records(&manifest, &plan, "market-live-20261027", "2026-10-27")
+            .expect("a chainlink-only market files its rows");
+        assert!(
+            !rows.iter().any(|row| row["role"] == json!("lazer_source")),
+            "no Lazer instance was deployed: {rows:?}"
+        );
+        let adapter = rows
+            .iter()
+            .find(|row| row["role"] == json!("chainlink_source"))
+            .unwrap_or_else(|| panic!("the adapter is filed: {rows:?}"));
+        assert_eq!(adapter["id"], json!(CHAINLINK_ADAPTER));
+        assert_eq!(adapter["wasm_hash"], json!("cd".repeat(32)));
     }
 
     /// A market that deploys no adapter files neither row.

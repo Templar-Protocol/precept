@@ -215,7 +215,10 @@ case "$*" in
     *description*017be2f55a*) echo '"XLM/USD"' ;;
     *description*) echo '"USDC/USD"' ;;
     *latest_round*) echo '{"answer":"1000000000000000000","round_id":1,"timestamp":'"$(( $(date +%s) - 60 ))"'}' ;;
-    *contract*invoke*--send*no*) echo 'null' ;;
+    # Only the literal `--send no` is a view. A looser pattern would also
+    # swallow a real send whose arguments happen to contain "no", and every
+    # "nothing was sent" assertion in this file rests on that booking.
+    *contract*invoke*"--send no"*) echo 'null' ;;
     *contract*upload*|*contract*deploy*|*contract*install*|*tx*submit*|*transaction*submit*|*contract*invoke*)
         booked
         echo '{"return":"0"}'
