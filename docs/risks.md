@@ -196,7 +196,9 @@ commitment mechanism, and it is the only one.
 ### Oracle governance
 
 The proxy oracle is governed; the adapter in front of it is not — the adapter is a fixed, ownerless translation of one
-proxy call into a SEP-40 price. What the oracle's governance contract can still change, and what it cannot:
+proxy call into a SEP-40 price. That holds for the pool's own adapter, which has no owner and no levers at all; a pool
+that quotes Chainlink Data Feeds instead has a Chainlink adapter in front of the runtime, and that one does have an
+owner (see the last two rows). What the oracle's governance contract can still change, and what it cannot:
 
 | Power | How it works | Reference |
 | --- | --- | --- |
@@ -208,6 +210,8 @@ proxy call into a SEP-40 price. What the oracle's governance contract can still 
 | Transfer or renounce ownership of the runtime contract | Two-step transfer, accept and renounce proposals, which need an admin | [engine.rs:161-188](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L161-L188), [contract/src/lib.rs:407-413](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/contract/src/lib.rs#L407-L413) |
 | Change how long a kind of proposal waits | A `set_action_ttl` proposal; an admin for admin-only kinds, the proxy-configuration role otherwise | [engine.rs:189-199](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L189-L199), [governance-common/src/lib.rs:190-197](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-common/src/lib.rs#L190-L197) |
 | Appoint or revoke governance roles, including admin | A `set_role` proposal, which needs an admin | [engine.rs:200-207](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/engine.rs#L200-L207), [roles.rs:27-49](https://github.com/Templar-Protocol/contracts/blob/df751d48878f7ce1e1bcefd8ce33ae93cd9f1269/contract/proxy-oracle/soroban/governance-contract/src/roles.rs#L27-L49) |
+| Upgrade, re-map or re-point the Chainlink adapter | The adapter's owner calls `upgrade`, `update_feed`, `remove_feed` or `set_proxy` directly: no proposal, no time-to-live, and no role in the runtime's governance. The owner is the pool's `oracle.admin` (or `pool.admin` when the config names no separate one), the same principal that holds the runtime's governance `Admin`, so this adds no principal — but it is a lever outside the governed table above, exactly as the Lazer source's owner levers are | [contract.rs](https://github.com/smartcontractkit/chainlink-stellar/blob/85a901e8/contracts/data-feeds/data-feeds-sep40-proxy/src/contract.rs) |
+| Chainlink's own proxy changes or stops | The adapter reads Chainlink's Data Feeds proxy (`latest_round`, `description`); its owner is Chainlink, not Templar and not the curator. A proxy upgrade that changes the ABI, or an outage, makes the adapter return no price, and the runtime then drops that source at refresh. Nothing in the pool can prevent it; the curator's remedy is the adapter owner's `set_proxy` to a working proxy, or a governance `set_proxy` that removes the source | [contract.rs](https://github.com/smartcontractkit/chainlink-stellar/blob/85a901e8/contracts/data-feeds/data-feeds-sep40-proxy/src/contract.rs) |
 
 Who holds those roles is not fixed. Admin is a role with any number of members, not a single address: the account given
 when the governance contract is initialised starts as the only admin

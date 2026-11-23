@@ -214,7 +214,8 @@ phase reads it; the digest is re-derived from `deployment-plan.toml` before
 *every* send, so a plan edited or replaced after approval stops the run at the
 next confirmation with `{"event":"approval_refused",...}` and exit 4, before
 anything is sent. Events are `phase`, `confirm` (summary only), `custody`,
-`done`, `failed`, plus `plan`, `approval_refused` and `stopped`; the
+`done`, `failed`, plus `plan`, `chainlink_feed`, `approval_refused` and
+`stopped`; the
 confirmation token is never printed, and a `failed` event carries the
 `violations` the stopping step reported. Exit codes: `0` finished, `1` stopped
 / failed / custody unresolved, `3` plan printed and awaiting approval, `4`
@@ -664,6 +665,44 @@ them uploads and deploys them.
 command line. No mainnet send has happened. The testnet rehearsal is
 unfinished.
 
+### Chainlink price sources
+
+A reserve may quote Chainlink Data Feeds instead of a SEP-40 contract of its
+own: `{"kind": "chainlink", "data_id": "<64 hex>", "pair": "<BASE>/USD"}`,
+with the `oracle` block naming the Chainlink Data Feeds proxy those feeds live
+behind (`oracle.chainlink_proxy`). Such a pool gets one `DataFeedsSep40Proxy`
+adapter of its own, deployed from the digest-pinned `chainlink-sep40-proxy`
+artifact: the run deploys it, maps each reserve's feed with `add_feed`, wires
+it into the pool's own proxy runtime as that asset's source, and hands its
+ownership to `oracle.admin` (or `pool.admin` when the config names no separate
+one) with the rest of the hand-off. The kind is refused on a pool that reuses
+a shared runtime (`oracle.runtime` set); reference a Chainlink-owned adapter
+with `kind: "sep40"` there instead.
+
+The adapter's owner holds `upgrade`, `update_feed`, `remove_feed` and
+`set_proxy` directly, with no proposal and no waiting time: the same ungoverned
+levers the Lazer source's owner holds, outside the runtime governance and any
+`set_action_ttl` timelock it may later set. The owner is `oracle.admin`, or
+`pool.admin` when the config names no separate oracle admin — the principal
+that already holds the runtime's governance `Admin`.
+
+Freshness is Chainlink's, not the keeper's: the feeds update on Chainlink's
+heartbeat (24 h for the pairs in use, with a 0.5 % deviation trigger), so a
+reserve's `max_age_secs` has to be wider than that heartbeat or the runtime
+drops the source at refresh. The plan comment shows each feed's age and the
+reserve's maximum beside the plan, and the run refuses a feed whose
+`description` is not the declared pair before anything is sent.
+
+A Chainlink proxy outage blocks the run: every construction, a resume
+included, reads each feed's latest round, so a run that stopped before the
+hand-off cannot resume until the proxy answers again. That is deliberate — a
+feed nobody can read is not a price — and the resume then picks up where the
+journal left it.
+
+On mainnet the run refuses a chainlink config until the launch profile records
+the audited commit of the adapter's code and Chainlink's audited bytes are
+live on mainnet; testnet already has them.
+
 ### Backstop custody
 
 A run does not keep the market's backstop shares on the key that deployed it. It
@@ -701,7 +740,8 @@ phase runs after the backing pool is frozen (and after activation, when
 `--activate` asked for it; without it the pool is handed over still in setup
 status 6 and activating it is the new admin's call), in this order: the pool's `propose_admin` to
 `pool.admin`, a two-step `transfer_ownership` of each Lazer source this run
-deployed to `oracle.admin`, then — when this run deployed the runtime and its
+deployed to `oracle.admin`, the same for the Chainlink adapter when the pool
+has one, then — when this run deployed the runtime and its
 governance — a governance proposal granting `Admin` to `oracle.admin` and a
 second removing it from the deploying key, and last the backing pool's
 `set_controller` to `pool.admin`.
