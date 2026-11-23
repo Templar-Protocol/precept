@@ -194,8 +194,9 @@ def _age(secs) -> str:
 def feed_table(events) -> list[str]:
     """The Chainlink feed ages the deployer read at plan time, or nothing.
 
-    Ages are events, never plan contents: they are read on every construction
-    (resumes included) and would make the plan digest move under the reviewer.
+    Ages are events, never plan contents: they are read when the plan is
+    frozen, and a resume skips them, so they would make the plan digest move
+    under the reviewer.
     """
     feeds = [e for e in events if e.get("event") == "chainlink_feed"]
     if not feeds:

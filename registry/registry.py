@@ -56,8 +56,8 @@ CHAINLINK_FORBIDDEN = ("contract", "asset", "feed_id")
 # The deployer's own rule (`is_usd_pair`): an upper-case base of at most 16
 # characters, quoted in USD. The gate must not be looser than the deployer.
 CHAINLINK_PAIR = re.compile(r"[A-Z0-9]{1,16}/USD\Z")
-# The Chainlink Data Feeds proxy each network's feeds live behind. A different
-# `oracle.chainlink_proxy` is flagged in the summary, not refused.
+# The Chainlink Data Feeds proxy each network's feeds live behind. Mainnet
+# refuses any other `oracle.chainlink_proxy`; testnet flags it in the summary.
 CHAINLINK_PROXIES = {
     "testnet": "CBUF6IADAWPWIDWRTHJNINKXHG2UTIQ6TU2F2HRAXWAI7OT3KJPKK6O4",
     "mainnet": "CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ",
@@ -653,10 +653,24 @@ def check_config(cfg, network, url):
     if proxy is not None:
         if strkey_ok(proxy, "C"):
             keys["oracle.chainlink_proxy"] = (proxy, instance_key(proxy), "contract instance")
+            if network == "mainnet" and proxy != CHAINLINK_PROXIES["mainnet"]:
+                errs.append(
+                    f"oracle.chainlink_proxy {proxy} is not Chainlink's Data Feeds proxy for mainnet "
+                    f"({CHAINLINK_PROXIES['mainnet']})"
+                )
         else:
             errs.append(f"oracle.chainlink_proxy: {proxy!r} is not a checksum-valid C strkey")
+        if not kinds.get("chainlink"):
+            errs.append("oracle.chainlink_proxy is set but no reserve has a chainlink source")
     elif kinds.get("chainlink") and "chainlink_proxy" not in oracle:
         errs.append("oracle.chainlink_proxy: missing (every chainlink source reads the Chainlink Data Feeds proxy)")
+    if network == "mainnet" and kinds.get("chainlink"):
+        # The deployer reads the audited commit from its launch profile, which
+        # the gate cannot see; enabling mainnet flips both in one change.
+        errs.append(
+            "chainlink sources are refused on mainnet until the deployer's launch profile "
+            "records the adapter's audited commit"
+        )
     if keys:
         try:
             found = fetch(url, [k for _, k, _ in keys.values()])
@@ -670,13 +684,18 @@ def check_config(cfg, network, url):
     chainlink = kinds.get("chainlink", 0)
     if runtime:
         summary = f"reuses runtime {runtime}"
-    elif set(kinds) == {"chainlink"}:
-        summary = (
-            "deploys its own runtime (the run stops at the refresh phase "
-            "if a Chainlink feed's latest round is older than its max_age_secs)"
-        )
     else:
-        summary = "deploys its own runtime (the run pauses at the refresh phase until the new Lazer sources are pushed)"
+        waits = []
+        if kinds.get("lazer"):
+            waits.append("the run pauses at the refresh phase until the new Lazer sources are pushed")
+        if chainlink:
+            waits.append(
+                "the run stops at the refresh phase if a Chainlink feed's latest round "
+                "is older than its max_age_secs"
+            )
+        if not waits:
+            waits.append("the run stops at the refresh phase until a source is fresh")
+        summary = f"deploys its own runtime ({'; '.join(waits)})"
     if chainlink and proxy is not None:
         holder = "oracle.admin" if "admin" in oracle else "pool.admin"
         summary += (
@@ -684,7 +703,7 @@ def check_config(cfg, network, url):
             f"{chainlink} feed{'' if chainlink == 1 else 's'}, its owner levers going to {holder}"
         )
         known = CHAINLINK_PROXIES.get(network)
-        if proxy != known:
+        if network != "mainnet" and proxy != known:
             summary += (
                 f"; FLAG: {proxy} is not the known Chainlink Data Feeds proxy for {network} ({known}), "
                 "confirm it is Chainlink's before approving"

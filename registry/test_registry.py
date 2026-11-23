@@ -572,18 +572,18 @@ class CheckConfigTest(unittest.TestCase):
 
     # ---------- the chainlink source kind ----------
 
-    def check_cfg(self, cfg, network="mainnet"):
-        return registry.check_config(cfg, network, "http://rpc")
+    def check_cfg(self, cfg):
+        return registry.check_config(cfg, cfg["network"], "http://rpc")
 
-    def cfg_problems(self, cfg, network="mainnet"):
-        return self.check_cfg(cfg, network)[0]
+    def cfg_problems(self, cfg):
+        return self.check_cfg(cfg)[0]
 
     def test_a_chainlink_config_passes(self):
         errs, summary = self.check_cfg(chainlink_cfg())
         self.assertEqual(errs, [], "\n".join(errs))
         self.assertIn("deploys its own runtime", summary)
         self.assertIn("Chainlink DataFeedsSep40Proxy adapter", summary)
-        self.assertIn(CL_PROXY, summary)
+        self.assertIn(CL_PROXY_TESTNET, summary)
         self.assertIn("2 feeds", summary)
         self.assertIn("pool.admin", summary)  # no oracle.admin: the pool admin takes the levers
         self.assertNotIn("FLAG", summary)
@@ -606,7 +606,7 @@ class CheckConfigTest(unittest.TestCase):
     def test_a_chainlink_proxy_must_exist_on_the_network(self):
         registry.fetch = lambda url, keys: {}
         self.assertProblem(self.cfg_problems(chainlink_cfg()),
-                           f"oracle.chainlink_proxy: {CL_PROXY} has no contract instance on mainnet")
+                           f"oracle.chainlink_proxy: {CL_PROXY_TESTNET} has no contract instance on testnet")
 
     def test_a_chainlink_source_names_a_64_hex_data_id(self):
         for bad in ("", "0" * 63, "0" * 65, "0" * 64 + "\n", "A" * 64, "zz" + "0" * 62):
@@ -665,28 +665,69 @@ class CheckConfigTest(unittest.TestCase):
         self.assertProblem(errs, "oracle.assets.usdc.sources[0].kind: 'pyth' is not one of")
         self.assertProblem(errs, "chainlink")
 
-    def test_a_non_canonical_chainlink_proxy_is_flagged_not_refused(self):
+    def test_a_non_canonical_chainlink_proxy_is_flagged_not_refused_on_testnet(self):
         other = registry.strkey_encode("C", b"\x59" * 32)
         errs, summary = self.check_cfg(setp(chainlink_cfg(), "oracle.chainlink_proxy", other))
         self.assertEqual(errs, [], "\n".join(errs))
         self.assertIn("FLAG", summary)
         self.assertIn(other, summary)
-        self.assertIn(CL_PROXY, summary)  # names the known proxy for the network
+        self.assertIn(CL_PROXY_TESTNET, summary)  # names the known proxy for the network
+
+    def test_a_non_canonical_chainlink_proxy_is_refused_on_mainnet(self):
+        other = registry.strkey_encode("C", b"\x59" * 32)
+        cfg = setp(chainlink_cfg(network="mainnet"), "oracle.chainlink_proxy", other)
+        self.assertProblem(
+            self.cfg_problems(cfg),
+            f"oracle.chainlink_proxy {other} is not Chainlink's Data Feeds proxy for mainnet ({CL_PROXY})",
+        )
+
+    def test_a_chainlink_source_is_refused_on_mainnet(self):
+        cfg = chainlink_cfg(network="mainnet")
+        cfg["oracle"]["chainlink_proxy"] = CL_PROXY
+        errs = self.cfg_problems(cfg)
+        self.assertProblem(
+            errs,
+            "chainlink sources are refused on mainnet until the deployer's launch profile "
+            "records the adapter's audited commit",
+        )
+        # The canonical proxy itself is not the reason for the refusal.
+        self.assertFalse(any("is not Chainlink's Data Feeds proxy" in e for e in errs), errs)
+
+    def test_a_chainlink_proxy_without_a_chainlink_source_is_refused(self):
+        for network in ("testnet", "mainnet"):
+            cfg = pool_cfg(network=network, oracle={
+                "chainlink_proxy": registry.CHAINLINK_PROXIES[network],
+                "assets": {"usdc": oracle_asset(), "xlm": oracle_asset()},
+            })
+            self.assertProblem(self.cfg_problems(cfg),
+                               "oracle.chainlink_proxy is set but no reserve has a chainlink source")
 
     def test_a_chainlink_only_own_runtime_summary_does_not_mention_lazer(self):
         summary = self.check_cfg(chainlink_cfg())[1]
         self.assertNotIn("Lazer", summary)
         self.assertIn("max_age_secs", summary)
 
-    def test_a_mixed_chainlink_and_sep40_pool_gets_the_generic_own_runtime_summary(self):
-        # The Chainlink-only text is for a pool whose every source is Chainlink;
-        # a pool that also references a SEP-40 contract keeps the generic one.
+    def test_a_mixed_chainlink_and_sep40_pool_names_the_chainlink_freshness_stop(self):
+        # A pool that also references a SEP-40 contract still stops at refresh
+        # for a stale Chainlink feed, and has no Lazer source to wait for.
         cfg = chainlink_cfg()
         cfg["oracle"]["assets"]["xlm"] = oracle_asset()
         errs, summary = self.check_cfg(cfg)
         self.assertEqual(errs, [], "\n".join(errs))
-        self.assertNotIn("max_age_secs", summary)
+        self.assertIn("max_age_secs", summary)
+        self.assertNotIn("Lazer", summary)
+
+    def test_a_chainlink_and_lazer_pool_names_both_waits(self):
+        cfg = chainlink_cfg()
+        cfg["oracle"]["assets"]["xlm"]["sources"].append({"kind": "lazer", "feed_id": 7})
+        summary = self.check_cfg(cfg)[1]
         self.assertIn("until the new Lazer sources are pushed", summary)
+        self.assertIn("max_age_secs", summary)
+
+    def test_a_sep40_only_own_runtime_summary_is_neutral(self):
+        summary = self.check_cfg(pool_cfg())[1]
+        self.assertIn("until a source is fresh", summary)
+        self.assertNotIn("Lazer", summary)
 
     def test_a_lazer_pool_summary_still_names_the_lazer_push(self):
         cfg = pool_cfg()
@@ -694,15 +735,9 @@ class CheckConfigTest(unittest.TestCase):
         summary = self.check_cfg(cfg)[1]
         self.assertIn("until the new Lazer sources are pushed", summary)
 
-    def test_a_chainlink_source_on_testnet_uses_the_testnet_proxy(self):
-        cfg = chainlink_cfg(network="testnet")
-        cfg["oracle"]["chainlink_proxy"] = registry.CHAINLINK_PROXIES["testnet"]
-        errs, summary = self.check_cfg(cfg, "testnet")
-        self.assertEqual(errs, [], "\n".join(errs))
-        self.assertNotIn("FLAG", summary)
-
 
 CL_PROXY = registry.CHAINLINK_PROXIES["mainnet"]
+CL_PROXY_TESTNET = registry.CHAINLINK_PROXIES["testnet"]
 CL_USDC = "01a80ff216000332000000000000000000000000000000000000000000000000"
 CL_XLM = "017be2f55a000332000000000000000000000000000000000000000000000000"
 
@@ -713,8 +748,10 @@ def chainlink_asset(data_id, pair):
 
 
 def chainlink_cfg(**over):
-    """A config whose two reserves quote Chainlink feeds through `CL_PROXY`."""
-    cfg = pool_cfg(oracle={"chainlink_proxy": CL_PROXY,
+    """A testnet config whose two reserves quote Chainlink feeds through the
+    testnet proxy; mainnet refuses chainlink sources until the adapter is audited."""
+    cfg = pool_cfg(network="testnet",
+                   oracle={"chainlink_proxy": CL_PROXY_TESTNET,
                            "assets": {"usdc": chainlink_asset(CL_USDC, "USDC/USD"),
                                       "xlm": chainlink_asset(CL_XLM, "XLM/USD")}})
     cfg.update(over)

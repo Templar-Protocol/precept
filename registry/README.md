@@ -133,9 +133,10 @@ It is the gate a pool-config PR has to pass before the deployer is run. One
 precise line per problem to stderr, exit 1; a clean file prints one summary
 line saying the network and whether the pool **reuses a runtime**
 (`oracle.runtime` set) or **deploys its own** — in the latter case the run
-pauses at the refresh phase until the new Lazer sources are pushed (a pool
-whose sources are all Chainlink instead waits for each feed's latest round to
-be younger than the reserve's `max_age_secs`), so say so in the PR. It checks
+waits at the refresh phase for whichever sources the pool has: a Lazer source
+until the new Lazer sources are pushed, a Chainlink source until each feed's
+latest round is younger than the reserve's `max_age_secs`, and a pool with
+neither until a source is fresh. Say so in the PR. It checks
 the JSON parses, `network` equals `--network`, no value is still `null` (an
 undecided value is not deployable; `pool.oracle` is exempt because the
 deployer fills it), and every bound below. Factors and rates are the
@@ -176,9 +177,22 @@ takes no `contract`, `asset` or `feed_id`; `data_id` is 64 lowercase hex and
 A reserve quotes Chainlink at most once, two reserves never share a `data_id`,
 and the kind is refused on a pool that reuses a shared runtime
 (`oracle.runtime` set) — reference a Chainlink-owned adapter with
-`kind: "sep40"` there instead. The summary line names the adapter the run
-deploys and flags a `chainlink_proxy` that is not the known Chainlink proxy for
-the network, so a reviewer sees it before approving.
+`kind: "sep40"` there instead. The summary line names the adapter code the run
+deploys and the proxy it reads through, so a reviewer sees both before
+approving.
+
+Three more chainlink rules refuse rather than flag:
+
+- On `mainnet`, `oracle.chainlink_proxy` must be Chainlink's Data Feeds proxy
+  (`CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ`); any other
+  address is refused. On `testnet` a different proxy is only flagged in the
+  summary.
+- `oracle.chainlink_proxy` set with no reserve declaring a `chainlink` source
+  is refused: the proxy would be deployed and read by nothing.
+- `chainlink` sources are refused on `mainnet` until the deployer's launch
+  profile records the adapter's audited commit. The deployer reads that
+  profile and the gate cannot, so the gate refuses every mainnet chainlink
+  config until the same change enables both.
 
 ### Deploying a config
 
