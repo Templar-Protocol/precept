@@ -5853,9 +5853,13 @@ impl MarketDeployer {
                 // than an overwrite of a mapping nobody here reviewed.
                 let adapter = self.deployed_id("chainlink")?;
                 let reserve = self.reserve(*asset)?;
-                let data_id = chainlink_source(reserve)
-                    .and_then(|source| source.data_id.clone())
+                let source = chainlink_source(reserve)
+                    .ok_or_else(|| anyhow!("a Chainlink mapping names no Chainlink source"))?;
+                let data_id = source
+                    .data_id
+                    .clone()
                     .ok_or_else(|| anyhow!("a Chainlink source names no data id"))?;
+                let pair = source.pair.clone().unwrap_or_default();
                 let asset_key = json!({ "Stellar": reserve.asset });
                 let reader = self.operator_reader();
                 let mapped = reader
@@ -5880,6 +5884,49 @@ impl MarketDeployer {
                         Some(adapter),
                         json!({"phase": slot.phase, "slot": slot.slot, "asset": asset}),
                     );
+                }
+                // A resumed run does not re-read the feed preflight, so this
+                // coordinate is the only place an outage can still be met: the
+                // adapter refuses a feed it cannot read and writes nothing, and
+                // left as a plain error that refusal would strand the open
+                // intent for a reconciliation that never finds a mapping.
+                // Asking the proxy first makes the outage a definite refusal
+                // instead — nothing is sent, the intent is archived, and a
+                // resume retries this coordinate once the feed answers.
+                let proxy = self
+                    .pool()?
+                    .chainlink_proxy
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("a market with Chainlink sources names no proxy"))?;
+                let answered = reader
+                    .try_view(
+                        proxy,
+                        self.ctx.admin_alias(),
+                        "latest_round",
+                        &[kv("data_id", data_id.as_str()), kv("decimals", 18)],
+                    )
+                    .is_ok_and(|invocation| invocation.ok);
+                if !answered {
+                    return Ok(Some(MarketStepRecord {
+                        phase: slot.phase,
+                        action: Safe::literal(slot.action),
+                        command: Safe::render_parsed(
+                            Policy::Market,
+                            &json!({"phase": slot.phase, "slot": slot.slot, "asset": asset}),
+                            900,
+                        ),
+                        outcome: Safe::literal(
+                            "the Chainlink feed did not answer the round this mapping reads",
+                        ),
+                        target: Some(adapter),
+                        violations: vec![Safe::render_terminal(
+                            &format!(
+                                "Chainlink feed '{pair}' did not answer latest_round; nothing was submitted; resume once it answers"
+                            ),
+                            512,
+                            false,
+                        )],
+                    }));
                 }
                 let st = self.operator_st(record)?;
                 must_ok(
@@ -7529,7 +7576,7 @@ impl MarketDeployer {
         // is someone else's business.
         let live_until_ledger = Self::frozen_live_until(record)
             .ok_or_else(|| anyhow!("this handoff froze no ownership deadline at its gate"))?;
-        if self.lazer_proposes_owner(&contract, &handoff.oracle_admin, live_until_ledger)? {
+        if self.proposes_owner(&contract, &handoff.oracle_admin, live_until_ledger)? {
             return read_only(
                 &format!(
                     "this {what} already holds this run's pending ownership transfer; the curator's acceptance is what remains"
@@ -7555,7 +7602,7 @@ impl MarketDeployer {
             "ownership transfer",
         )?;
         anyhow::ensure!(
-            self.lazer_proposes_owner(&contract, &handoff.oracle_admin, live_until_ledger)?,
+            self.proposes_owner(&contract, &handoff.oracle_admin, live_until_ledger)?,
             "the {what} does not report this run's pending ownership transfer"
         );
         step(
@@ -7593,7 +7640,7 @@ impl MarketDeployer {
             .ok()
             .and_then(|owner| owner.as_str().map(str::to_string))
             .is_some_and(|owner| owner == handoff.oracle_admin)
-            || self.lazer_proposes_owner(contract, &handoff.oracle_admin, live_until_ledger)?)
+            || self.proposes_owner(contract, &handoff.oracle_admin, live_until_ledger)?)
     }
 
     /// The role transfers this run's frozen graph owes, or a refusal naming
@@ -7692,21 +7739,29 @@ impl MarketDeployer {
         Ok(expiry > reader.latest_ledger()?)
     }
 
-    /// Whether one Lazer source's temporary `PendingOwner` entry holds exactly
-    /// this run's proposal. The key is the fieldless `OwnableStorageKey`
-    /// variant and the value the `PendingTransfer { address,
-    /// live_until_ledger }` struct it holds (stellar-access
+    /// Whether one ownable contract's temporary `PendingOwner` entry holds
+    /// exactly this run's proposal and the proposal can still be accepted.
+    /// Serves both the Lazer sources and the Chainlink adapter, which are the
+    /// same shape of contract here. The key is the fieldless
+    /// `OwnableStorageKey` variant and the value the `PendingTransfer {
+    /// address, live_until_ledger }` struct it holds (stellar-access
     /// ownable/storage.rs, role_transfer/storage.rs), which a contracttype
     /// struct encodes as a map of symbol keys in sorted order. Nothing here
     /// is ignored: the deadline compared is the one this coordinate froze at
-    /// its own gate.
-    fn lazer_proposes_owner(
+    /// its own gate, and it must not have passed — `accept_ownership` is
+    /// rejected once the ledger is beyond it, and anyone can keep a
+    /// temporary entry alive past that point, so a matching entry alone does
+    /// not prove the hand-off can be completed.
+    fn proposes_owner(
         &self,
         source: &ContractId,
         target: &str,
         live_until_ledger: u32,
     ) -> anyhow::Result<bool> {
         let reader = self.operator_reader();
+        if reader.latest_ledger()? > live_until_ledger {
+            return Ok(false);
+        }
         let key = reader.xdr_encode_scval(&json!({"vec": [{"symbol": "PendingOwner"}]}))?;
         let want = reader.xdr_encode_scval(&json!({"map": [
             {"key": {"symbol": "address"}, "val": {"address": target}},
@@ -14138,6 +14193,89 @@ exit 1
         market.clean();
     }
 
+
+    /// A pending transfer whose deadline has passed is not this run's
+    /// hand-off, however well its bytes match. Anyone may keep a temporary
+    /// entry alive, and stellar-access rejects `accept_ownership` once the
+    /// ledger is beyond the deadline, so settling on a matching entry alone
+    /// would record a hand-off whose acceptance cannot succeed. The stand-in
+    /// answers `ledger latest` with 1234567, so a deadline of 1234566 is one
+    /// ledger in the past and 1234567 is the ledger the run would accept at.
+    #[test]
+    fn a_resumed_run_does_not_settle_a_chainlink_handoff_whose_deadline_passed() {
+        let foreign = fixture_actor(9);
+        let mut market = a_real_market_chainlink("chainlink-handoff-expired");
+        market.arm(&format!("account-{}", foreign.as_str()), "open");
+        market
+            .cfg
+            .pool
+            .as_mut()
+            .expect("a real market has a pool")
+            .admin = foreign.as_str().to_string();
+        let adapter = fixture_contract(79);
+        let d = market.run(false);
+        let slot = market.slot(&MOp::RealHandoffChainlink);
+        let record = |deadline: u32| {
+            let mut record = MarketCustodyRecord {
+                phase: slot.phase,
+                kind: slot.kind,
+                action: Safe::literal(slot.action),
+                network: MarketNetwork::Testnet,
+                signer: market.admin.clone(),
+                payload_digest: Sha256Hex::default(),
+                target: Some(adapter.clone()),
+                artifact_digest: None,
+                predicted: None,
+                pre_state: vec![Safe::literal("an interrupted handoff")],
+                tool_error: None,
+            };
+            record.pre_state.push(
+                Safe::render_market_json(
+                    &json!({"pending_live_until_ledger": deadline}),
+                    256,
+                )
+                .expect("fixture deadline"),
+            );
+            record.payload_digest = custody_payload_digest(&record).expect("fixture digest");
+            record
+        };
+        let mut d = d;
+        market.arm_deployed(&mut d, [("chainlink", adapter.clone())]);
+        market.arm(
+            &format!("temp-{}", adapter.as_str()),
+            &format!(
+                "{{\"map\":[{{\"key\":{{\"symbol\":\"address\"}},\"val\":{{\"address\":\"{}\"}}}},\
+                 {{\"key\":{{\"symbol\":\"live_until_ledger\"}},\"val\":{{\"u32\":1234566}}}}]}}",
+                foreign.as_str()
+            ),
+        );
+        // The entry's bytes are exactly the ones the frozen deadline names, but
+        // the ledger is already past that deadline: acceptance cannot succeed.
+        assert!(
+            !d.real_effect_present(&slot.op, &record(1_234_566))
+                .expect("the proof is readable"),
+            "a pending transfer past its deadline is not this run's handoff: {}",
+            market.calls()
+        );
+        // The same bytes with a deadline the ledger has not passed are still
+        // this run's own: the check refuses an expired proposal, not every one.
+        market.arm(
+            &format!("temp-{}", adapter.as_str()),
+            &format!(
+                "{{\"map\":[{{\"key\":{{\"symbol\":\"address\"}},\"val\":{{\"address\":\"{}\"}}}},\
+                 {{\"key\":{{\"symbol\":\"live_until_ledger\"}},\"val\":{{\"u32\":1234567}}}}]}}",
+                foreign.as_str()
+            ),
+        );
+        assert!(
+            d.real_effect_present(&slot.op, &record(1_234_567))
+                .expect("the proof is readable"),
+            "a pending transfer acceptable at this ledger is this run's handoff: {}",
+            market.calls()
+        );
+        market.clean();
+    }
+
     /// A feed already mapped to this run's data id is not mapped twice.
     #[test]
     fn a_mapped_chainlink_feed_is_not_mapped_twice() {
@@ -14188,6 +14326,106 @@ exit 1
         assert!(
             !market.calls().contains("add_feed"),
             "a mapping this run did not make was overwritten: {}",
+            market.calls()
+        );
+        market.clean();
+    }
+
+
+    /// A Chainlink outage met at the mapping coordinate is a definite refusal,
+    /// not an error that strands the intent. A resumed run does not re-read the
+    /// feed preflight, so the adapter's own rejection of an unreadable feed
+    /// would leave an open intent that a later reconciliation can never
+    /// attribute to a mapping. Asking the proxy first sends nothing, archives
+    /// the intent for replay, and the same coordinate settles on the resume
+    /// once the feed answers.
+    #[test]
+    fn a_chainlink_outage_at_the_mapping_coordinate_is_replayed_on_resume() {
+        let market = a_real_market_chainlink("chainlink-map-outage");
+        let adapter = fixture_contract(77);
+        // The first construction freezes the plan and reads both feeds; from
+        // here on the proxy may go away without blocking a resume.
+        let _ = market.run(false);
+        market.disarm(&format!("round-{}", chainlink_data_id(1)));
+        let op = MOp::RealMapChainlink { asset: 1 };
+        let (slot, _, mut d) = market.open_gate_armed(&op, [("chainlink", adapter.clone())]);
+        let token = d
+            .gate
+            .as_ref()
+            .unwrap_or_else(|| panic!("the mapping gate did not open:\n{}", market.calls()))
+            .token
+            .clone();
+        let ev = d
+            .step(DeployAct::Confirm { token })
+            .expect("the confirmed step runs");
+        let DeployEvent::Failed(reason) = &ev else {
+            market.clean();
+            panic!("a feed that does not answer must stop the run: {ev:?}");
+        };
+        assert!(
+            reason.to_string().contains("violation"),
+            "the failure names the refusal: {reason}"
+        );
+        let violations = d.stopped_violations().to_vec();
+        assert_eq!(violations.len(), 1, "one violation, the step's own: {violations:?}");
+        let note = violations[0].to_string();
+        assert!(
+            note.contains("XLM/USD")
+                && note.contains("did not answer latest_round")
+                && note.contains("nothing was submitted"),
+            "the violation names the feed and that nothing was sent: {note}"
+        );
+        assert!(
+            !market.calls().contains("add_feed"),
+            "an unreadable feed reached the adapter: {}",
+            market.calls()
+        );
+        assert!(
+            !market.settled(&slot),
+            "a refusal is never a settled mutation"
+        );
+        // The intent survives, archived for replay, so a resume asks again
+        // instead of reconciling a mapping that was never attempted.
+        let archive = market
+            .out
+            .join("market-unapplied")
+            .join(format!("{:03}-{:02}", slot.phase, slot.slot));
+        assert!(
+            archive.join("intent.json").is_file(),
+            "the intent bytes survive the refusal"
+        );
+        assert!(
+            archive.join("unapplied.json").is_file(),
+            "the proof is filed with the intent"
+        );
+        // The feed answers again: the archived coordinate replays and settles,
+        // and this time the mapping is submitted.
+        market.arm(
+            &format!("round-{}", chainlink_data_id(1)),
+            &format!(
+                "{{\"answer\":\"1000000000000000000\",\"round_id\":1,\"timestamp\":{}}}",
+                crate::market::now_epoch_secs().saturating_sub(60)
+            ),
+        );
+        let mut resumed = market.run(false);
+        market.arm_deployed(&mut resumed, [("chainlink", adapter)]);
+        market
+            .confirm(&mut resumed, &op)
+            .expect("the resumed mapping settles once the feed answers");
+        assert!(
+            market.settled(&slot),
+            "the replayed mapping must settle: {}",
+            market.calls()
+        );
+        let calls = market.calls();
+        let mapped: Vec<&str> = calls
+            .lines()
+            .filter(|line| line.starts_with("contract invoke") && line.contains(" add_feed "))
+            .collect();
+        assert_eq!(
+            mapped.len(),
+            1,
+            "exactly one mapping was submitted, on the resume: {}",
             market.calls()
         );
         market.clean();

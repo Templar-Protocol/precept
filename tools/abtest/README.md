@@ -707,17 +707,22 @@ anything is sent.
 A Chainlink proxy outage blocks freezing a new plan, not resuming one: the feed
 reads happen only when the plan is frozen, and a resume skips them and picks up
 where the journal left it. That is deliberate — a feed nobody can read is not a
-price to plan against. The proxy's existence on the network is still checked on
-every construction, resume included, because that is a network binding rather
-than a feed read.
+price to plan against. A feed-mapping coordinate asks the feed once more just
+before it sends `add_feed`; if the feed does not answer, nothing is sent and the
+coordinate stops as a refusal a later resume retries. The proxy's existence on
+the network is still checked on every construction, resume included, because
+that is a network binding rather than a feed read.
 
-On mainnet the deployer refuses a chainlink config until its launch profile
-records the audited commit of the adapter's code, and the config gate refuses
-the same configs until the same change flips both; testnet already has the
-audited bytes. Mainnet also refuses an `oracle.chainlink_proxy` that is not
-Chainlink's own Data Feeds proxy, while testnet accepts any proxy and only
-flags a different one in the gate's summary. The CI run passes no `--wasm-dir`,
-so the pinned bytes must already be on mainnet for it to plan.
+The pinned adapter code is Chainlink's own testnet sample (the code its sample
+adapter `CCT6EH2KKCGJCXAF2AXM7P7LLNRRBOKRVB7BJNLX2EBPYHAXGZPSY3F2` runs); nobody
+has yet tied those bytes to Chainlink's audited commit, so a testnet chainlink
+market runs code whose audit is unconfirmed. On mainnet the deployer refuses a
+chainlink config until its launch profile records that audited commit, and the
+config gate refuses the same configs until the same change flips both. Mainnet
+also refuses an `oracle.chainlink_proxy` that is not Chainlink's own Data Feeds
+proxy, while testnet accepts any proxy and only flags a different one in the
+gate's summary. The CI run passes no `--wasm-dir`, so the pinned bytes must
+already be on mainnet for it to plan.
 
 ### Backstop custody
 
