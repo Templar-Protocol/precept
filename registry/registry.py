@@ -47,10 +47,27 @@ POLICY = {
 # Values filled in by the deployer, so `null` is legitimate in the config.
 NULL_OK = {"pool.oracle"}
 
+# Closed set of oracle source kinds a pool config may use (README "Configs").
+SOURCE_KINDS = ("lazer", "sep40", "mock", "chainlink")
+# A chainlink source names its feed and pair only: the adapter keys the feed by
+# the reserve's own asset, so these three belong to the other kinds.
+CHAINLINK_FIELDS = {"kind", "data_id", "pair"}
+CHAINLINK_FORBIDDEN = ("contract", "asset", "feed_id")
+# The deployer's own rule (`is_usd_pair`): an upper-case base of at most 16
+# characters, quoted in USD. The gate must not be looser than the deployer.
+CHAINLINK_PAIR = re.compile(r"[A-Z0-9]{1,16}/USD\Z")
+# The Chainlink Data Feeds proxy each network's feeds live behind. A different
+# `oracle.chainlink_proxy` is flagged in the summary, not refused.
+CHAINLINK_PROXIES = {
+    "testnet": "CBUF6IADAWPWIDWRTHJNINKXHG2UTIQ6TU2F2HRAXWAI7OT3KJPKK6O4",
+    "mainnet": "CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ",
+}
+
 STATUSES = ("active", "retired")
 # `refs` keys whose target is NOT a Templar-deployed contract and so need not
-# be in the registry (e.g. the Pyth Lazer verifier, third-party tokens).
-EXTERNAL_REF_KEYS = {"verifier", "token"}
+# be in the registry (e.g. the Pyth Lazer verifier, third-party tokens, the
+# Chainlink Data Feeds proxy a `chainlink_source` reads).
+EXTERNAL_REF_KEYS = {"verifier", "token", "feed_proxy"}
 
 CONTRACT_REQUIRED = {"kind", "network", "id", "role", "deployment", "status", "wasm_hash", "refs", "deployed_at"}
 CONTRACT_OPTIONAL = {"label", "admin", "assets"}
@@ -534,11 +551,43 @@ def _check_reserves(cfg, errs):
     return labels
 
 
+def _check_chainlink_source(errs, at, name, s, runtime, feeds):
+    """Rules for one `kind: "chainlink"` source of oracle asset `name`; `feeds`
+    maps each data_id seen so far to the asset that uses it."""
+    for key in s:
+        if key in CHAINLINK_FORBIDDEN:
+            errs.append(f"{at}.{key}: a chainlink source takes no {key} (the adapter keys the feed by the reserve's own asset)")
+        elif key not in CHAINLINK_FIELDS:
+            errs.append(f"{at}.{key}: unknown field on a chainlink source (kind, data_id, pair)")
+    data_id = _get(errs, s, "data_id", at, str)
+    if data_id is not None:
+        if not HEX64.match(data_id):
+            errs.append(f"{at}.data_id: {data_id!r} is not 64 lowercase hex characters")
+        elif data_id in feeds:
+            errs.append(f"{at}.data_id: {data_id} is already the feed of oracle.assets.{feeds[data_id]}; reserves do not share a feed")
+        else:
+            feeds[data_id] = name
+    pair = _get(errs, s, "pair", at, str)
+    if pair is not None and not CHAINLINK_PAIR.match(pair):
+        errs.append(f"{at}.pair: {pair!r} is not <BASE>/USD (uppercase letters and digits quoted in USD)")
+    if runtime is not None:
+        errs.append(
+            f"{at}: a chainlink source needs the pool's own proxy runtime, but oracle.runtime is set; "
+            'reference a Chainlink-owned adapter with kind "sep40" instead'
+        )
+
+
 def _check_oracle(cfg, labels, errs):
+    """Quorum, freshness and source rules for `oracle.assets`; returns how many
+    sources of each kind the config declares."""
     P = POLICY
-    assets = _get(errs, cfg.get("oracle"), "assets", "oracle", dict)
+    kinds = {}
+    oracle = cfg.get("oracle")
+    assets = _get(errs, oracle, "assets", "oracle", dict)
     if assets is None:
-        return
+        return kinds
+    runtime = oracle.get("runtime")
+    feeds = {}
     for label in labels:
         if label is not None and label not in assets:
             errs.append(f"oracle.assets.{label}: missing (reserve {label!r} has no oracle entry)")
@@ -550,6 +599,26 @@ def _check_oracle(cfg, labels, errs):
         if ms is not None and not P["min_sources_min"] <= ms <= top:
             errs.append(f"{at}.min_sources: {ms} outside {P['min_sources_min']}..{top} (number of sources)")
         _bound(errs, f"{at}.max_age_secs", _get(errs, a, "max_age_secs", at, int), P["max_age_secs_min"], P["max_age_secs_max"])
+        chainlink = 0
+        for j, s in enumerate(srcs or []):
+            sat = f"{at}.sources[{j}]"
+            kind = _get(errs, s, "kind", sat, str)
+            if kind is None:
+                continue
+            if kind not in SOURCE_KINDS:
+                errs.append(f"{sat}.kind: {kind!r} is not one of {', '.join(SOURCE_KINDS)}")
+                continue
+            kinds[kind] = kinds.get(kind, 0) + 1
+            if kind == "chainlink":
+                chainlink += 1
+                _check_chainlink_source(errs, sat, name, s, runtime, feeds)
+            else:
+                for key in ("data_id", "pair"):
+                    if key in s:
+                        errs.append(f"{sat}.{key}: only a chainlink source takes a {key}")
+        if chainlink > 1:
+            errs.append(f"{at}.sources: {chainlink} chainlink sources; a reserve quotes Chainlink at most once")
+    return kinds
 
 
 def check_config(cfg, network, url):
@@ -565,7 +634,7 @@ def check_config(cfg, network, url):
     _bound(errs, "pool.backstop_take_rate", _get(errs, pool, "backstop_take_rate", "pool", int), 0, P["backstop_take_rate_max"])
     _bound(errs, "pool.max_positions", _get(errs, pool, "max_positions", "pool", int), P["max_positions_min"], P["max_positions_max"])
     labels = _check_reserves(cfg, errs)
-    _check_oracle(cfg, labels, errs)
+    kinds = _check_oracle(cfg, labels, errs)
     oracle = cfg.get("oracle") if isinstance(cfg.get("oracle"), dict) else {}
     admins = [("pool.admin", _get(errs, pool, "admin", "pool", str))]
     if "admin" in oracle:
@@ -580,6 +649,14 @@ def check_config(cfg, network, url):
             keys[path] = (addr, instance_key(addr), "contract instance")
         else:
             errs.append(f"{path}: {addr!r} is not a checksum-valid G or C strkey")
+    proxy = _get(errs, oracle, "chainlink_proxy", "oracle", str) if "chainlink_proxy" in oracle else None
+    if proxy is not None:
+        if strkey_ok(proxy, "C"):
+            keys["oracle.chainlink_proxy"] = (proxy, instance_key(proxy), "contract instance")
+        else:
+            errs.append(f"oracle.chainlink_proxy: {proxy!r} is not a checksum-valid C strkey")
+    elif kinds.get("chainlink") and "chainlink_proxy" not in oracle:
+        errs.append("oracle.chainlink_proxy: missing (every chainlink source reads the Chainlink Data Feeds proxy)")
     if keys:
         try:
             found = fetch(url, [k for _, k, _ in keys.values()])
@@ -590,11 +667,28 @@ def check_config(cfg, network, url):
                 if key not in found:
                     errs.append(f"{path}: {addr} has no {what} on {network}")
     runtime = oracle.get("runtime")
-    summary = (
-        f"reuses runtime {runtime}"
-        if runtime
-        else "deploys its own runtime (the run pauses at the refresh phase until the new Lazer sources are pushed)"
-    )
+    chainlink = kinds.get("chainlink", 0)
+    if runtime:
+        summary = f"reuses runtime {runtime}"
+    elif set(kinds) == {"chainlink"}:
+        summary = (
+            "deploys its own runtime (the run stops at the refresh phase "
+            "if a Chainlink feed's latest round is older than its max_age_secs)"
+        )
+    else:
+        summary = "deploys its own runtime (the run pauses at the refresh phase until the new Lazer sources are pushed)"
+    if chainlink and proxy is not None:
+        holder = "oracle.admin" if "admin" in oracle else "pool.admin"
+        summary += (
+            f"; deploys one Chainlink DataFeedsSep40Proxy adapter over proxy {proxy} for "
+            f"{chainlink} feed{'' if chainlink == 1 else 's'}, its owner levers going to {holder}"
+        )
+        known = CHAINLINK_PROXIES.get(network)
+        if proxy != known:
+            summary += (
+                f"; FLAG: {proxy} is not the known Chainlink Data Feeds proxy for {network} ({known}), "
+                "confirm it is Chainlink's before approving"
+            )
     return errs, summary
 
 
