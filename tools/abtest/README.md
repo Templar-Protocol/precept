@@ -677,31 +677,47 @@ it into the pool's own proxy runtime as that asset's source, and hands its
 ownership to `oracle.admin` (or `pool.admin` when the config names no separate
 one) with the rest of the hand-off. The kind is refused on a pool that reuses
 a shared runtime (`oracle.runtime` set); reference a Chainlink-owned adapter
-with `kind: "sep40"` there instead.
+with `kind: "sep40"` there instead. A `chainlink_proxy` named with no reserve
+declaring a `chainlink` source is refused too: the run would deploy and
+configure an adapter nothing reads.
 
 The adapter's owner holds `upgrade`, `update_feed`, `remove_feed` and
-`set_proxy` directly, with no proposal and no waiting time: the same ungoverned
-levers the Lazer source's owner holds, outside the runtime governance and any
-`set_action_ttl` timelock it may later set. The owner is `oracle.admin`, or
-`pool.admin` when the config names no separate oracle admin — the principal
-that already holds the runtime's governance `Admin`.
+`set_proxy` directly, with no proposal and no waiting time, and can recover
+tokens sent to the adapter (`TokenRecoverable`): the same ungoverned levers the
+Lazer source's owner holds, outside the runtime governance and any
+`set_action_ttl` timelock it may later set. Ownership cannot be renounced — the
+contract panics on `renounce_ownership` — so the owner stays until it transfers
+the adapter. The owner is `oracle.admin`, or `pool.admin` when the config names
+no separate oracle admin — the principal that already holds the runtime's
+governance `Admin`.
 
 Freshness is Chainlink's, not the keeper's: the feeds update on Chainlink's
-heartbeat (24 h for the pairs in use, with a 0.5 % deviation trigger), so a
-reserve's `max_age_secs` has to be wider than that heartbeat or the runtime
-drops the source at refresh. The plan comment shows each feed's age and the
-reserve's maximum beside the plan, and the run refuses a feed whose
-`description` is not the declared pair before anything is sent.
+heartbeat (24 h for the pairs in use, with a 0.5 % deviation trigger; see
+[Chainlink's Stellar feed list](https://docs.chain.link/data-feeds/price-feeds/addresses?network=stellar)).
+`max_age_secs` is capped at 86 400 s, the heartbeat itself, and the pool
+rejects a price older than 24 h anyway, so the cap cannot be raised. A stable
+pair whose 0.5 % trigger rarely fires is therefore briefly stale every day,
+from the moment the heartbeat expires until the next round lands, and the
+runtime drops the source for that window. Do not make Chainlink a reserve's
+only source: pair it with a SEP-40 source so the reserve keeps a price. The
+plan comment shows each feed's age and the reserve's maximum beside the plan,
+and the run refuses a feed whose `description` is not the declared pair before
+anything is sent.
 
-A Chainlink proxy outage blocks the run: every construction, a resume
-included, reads each feed's latest round, so a run that stopped before the
-hand-off cannot resume until the proxy answers again. That is deliberate — a
-feed nobody can read is not a price — and the resume then picks up where the
-journal left it.
+A Chainlink proxy outage blocks freezing a new plan, not resuming one: the feed
+reads happen only when the plan is frozen, and a resume skips them and picks up
+where the journal left it. That is deliberate — a feed nobody can read is not a
+price to plan against. The proxy's existence on the network is still checked on
+every construction, resume included, because that is a network binding rather
+than a feed read.
 
-On mainnet the run refuses a chainlink config until the launch profile records
-the audited commit of the adapter's code and Chainlink's audited bytes are
-live on mainnet; testnet already has them.
+On mainnet the deployer refuses a chainlink config until its launch profile
+records the audited commit of the adapter's code, and the config gate refuses
+the same configs until the same change flips both; testnet already has the
+audited bytes. Mainnet also refuses an `oracle.chainlink_proxy` that is not
+Chainlink's own Data Feeds proxy, while testnet accepts any proxy and only
+flags a different one in the gate's summary. The CI run passes no `--wasm-dir`,
+so the pinned bytes must already be on mainnet for it to plan.
 
 ### Backstop custody
 
