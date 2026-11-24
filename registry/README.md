@@ -38,8 +38,8 @@ spacing is never required, just not wrong-casing hex or breaking sort.
 
 - `id` — contract strkey; `role` — what the contract is: `pool`, `backstop`,
   `pool_factory`, `pool_oracle_adapter`, `proxy_runtime`, `proxy_governance`,
-  `lazer_source`, `price_source`, `oracle`, `token`, `comet`, `emitter`,
-  `faucet`, `admin_smart_account`, `admin_policy`.
+  `lazer_source`, `chainlink_source`, `price_source`, `oracle`, `token`,
+  `comet`, `emitter`, `faucet`, `admin_smart_account`, `admin_policy`.
 - `deployment` — the stable name of the run that created the contract (its
   evidence run name). Contracts a later run reused keep the creating run's
   name; when the run that *created* them is retired but they still serve an
@@ -53,8 +53,9 @@ spacing is never required, just not wrong-casing hex or breaking sort.
   `pool_oracle_adapter`/`backstop`/`pool_factory`; an adapter refs its
   `proxy_runtime`; a runtime refs its `proxy_governance` and vice versa;
   sources ref their verifier/runtime). Targets must be registered, except
-  under external keys `verifier` and `token` (e.g. the Pyth Lazer verifier,
-  third-party tokens), which may name contracts we did not deploy.
+  under external keys `verifier`, `token` and `feed_proxy` (e.g. the Pyth
+  Lazer verifier, third-party tokens, the Chainlink Data Feeds proxy a
+  `chainlink_source` reads), which may name contracts we did not deploy.
 - optional: `label` (free text, e.g. which token a token contract is),
   `admin` (G… account or C… contract strkey, e.g. a multisig smart account),
   `assets` (pool reserve token contract ids).
@@ -68,8 +69,9 @@ spacing is never required, just not wrong-casing hex or breaking sort.
   `stellar contract deploy --wasm-hash <hash>`.
 - `artifact` — what the code is (`pool`, `backstop`, `pool_factory`,
   `pool_oracle_adapter`, `soroban-proxy-oracle`, `soroban-proxy-governance`,
-  `soroban-lazer-source`, `soroban-proxy-batcher`, `token`, `comet`,
-  `emitter`, …). The same artifact may have several hashes/versions.
+  `soroban-lazer-source`, `chainlink-sep40-proxy`, `soroban-proxy-batcher`,
+  `token`, `comet`, `emitter`, …). The same artifact may have several
+  hashes/versions.
 - `source` — how to get the bytes: `{"repo", "tag", "asset"}` for a GitHub
   release asset, `{"repo", "commit"}` for a reproducible build, or a `note`
   saying why the source is not pinned (e.g. a crate's prebuilt testutils
@@ -131,11 +133,14 @@ It is the gate a pool-config PR has to pass before the deployer is run. One
 precise line per problem to stderr, exit 1; a clean file prints one summary
 line saying the network and whether the pool **reuses a runtime**
 (`oracle.runtime` set) or **deploys its own** — in the latter case the run
-pauses at the refresh phase until the new Lazer sources are pushed, so say so
-in the PR. It checks the JSON parses, `network` equals `--network`, no value
-is still `null` (an undecided value is not deployable; `pool.oracle` is exempt
-because the deployer fills it), and every bound below. Factors and rates are
-the contract's 7-decimal fixed point, so `10000000` is 1.0; the bounds live
+waits at the refresh phase for whichever sources the pool has: a Lazer source
+until the new Lazer sources are pushed, a Chainlink source until each feed's
+latest round is younger than the reserve's `max_age_secs`, and a pool with
+neither until a source is fresh. Say so in the PR. It checks
+the JSON parses, `network` equals `--network`, no value is still `null` (an
+undecided value is not deployable; `pool.oracle` is exempt because the
+deployer fills it), and every bound below. Factors and rates are the
+contract's 7-decimal fixed point, so `10000000` is 1.0; the bounds live
 in `POLICY` at the top of `registry.py`. They are deliberately conservative —
 outside them usually means a decimal or units mistake, not a market decision,
 and every shipped config sits well inside them:
@@ -160,6 +165,40 @@ an account entry for `G…`, a contract-instance entry for `C…`. A curator
 that does not exist yet cannot accept the handoff, and discovering that after
 the deploy costs a day.
 
+`oracle.chainlink_proxy` (a `C…` contract strkey, checked on the network like
+the admins) is the Chainlink Data Feeds proxy a pool's `chainlink` sources read
+through. A source of that kind names its feed and pair only:
+
+    {"kind": "chainlink", "data_id": "<64 lowercase hex>", "pair": "<BASE>/USD"}
+
+The adapter keys the feed by the reserve's own asset, so a `chainlink` source
+takes no `contract`, `asset` or `feed_id`; `data_id` is 64 lowercase hex and
+`pair` is uppercase letters and digits quoted in USD (`USDC/USD`, `XLM/USD`).
+A reserve quotes Chainlink at most once, two reserves never share a `data_id`,
+and the kind is refused on a pool that reuses a shared runtime
+(`oracle.runtime` set) — reference a Chainlink-owned adapter with
+`kind: "sep40"` there instead. The summary line names the adapter code the run
+deploys, the proxy it reads through, and each reserve's feed (`feeds
+usdc=USDC/USD, ...`), so a reviewer sees all three before approving. The gate
+cannot prove a feed prices its reserve's asset: two reserves' feeds swapped are
+each well formed, and each feed's own description matches its pair. It flags a
+feed whose pair's base is not the reserve's label instead, and it flags a
+reserve whose only source is Chainlink, which has no price whenever the feed's
+latest round is older than its `max_age_secs`.
+
+Three more chainlink rules refuse rather than flag:
+
+- On `mainnet`, `oracle.chainlink_proxy` must be Chainlink's Data Feeds proxy
+  (`CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ`); any other
+  address is refused. On `testnet` a different proxy is only flagged in the
+  summary.
+- `oracle.chainlink_proxy` set with no reserve declaring a `chainlink` source
+  is refused: the proxy would be deployed and read by nothing.
+- `chainlink` sources are refused on `mainnet` until the deployer's launch
+  profile records the adapter's audited commit. The deployer reads that
+  profile and the gate cannot, so the gate refuses every mainnet chainlink
+  config until the same change enables both.
+
 ### Deploying a config
 
 A curator opens a PR that adds or changes `configs/<name>.json`, with
@@ -183,14 +222,16 @@ smart account. CI does the rest:
    pool's price feeds are live; the comment says how to resume
    (`workflow_dispatch`, `run=<id>`); settled steps are never sent again.
 4. **Handoff.** The same run proposes the pool admin to `pool.admin`,
-   transfers ownership of each Lazer source it deployed to `oracle.admin`,
-   grants the governance `Admin` role of a runtime it deployed to
-   `oracle.admin` and revokes its own, and sets the Comet controller to
-   `pool.admin` last. A registry PR records the contracts.
+   transfers ownership of each Lazer source it deployed to `oracle.admin`, does
+   the same for the Chainlink adapter when the pool has one, grants the
+   governance `Admin` role of a runtime it deployed to `oracle.admin` and
+   revokes its own, and sets the Comet controller to `pool.admin` last. A
+   registry PR records the contracts.
 5. **Accept.** The curator signs `accept_admin()` on the pool (within 10 days)
-   and `accept_ownership()` on each Lazer source from their own wallet; the
-   deploy comment lists each call. Activation (`set_status`) and every later
-   parameter change are the curator's own admin actions: CI never activates.
+   and `accept_ownership()` on each Lazer source and on the Chainlink adapter
+   from their own wallet; the deploy comment lists each call. Activation
+   (`set_status`) and every later parameter change are the curator's own admin
+   actions: CI never activates.
 
 ## Tests
 

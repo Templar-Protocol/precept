@@ -391,7 +391,10 @@ pub(crate) fn market_records(
     // lab's three mock sources are its own deployments, so they keep their
     // rows.
     if real.is_some() {
-        let lazer = digest("lazer-source")?;
+        // The digest is asked for only when there is a row to file: a market
+        // whose sources are all Chainlink deploys no Lazer instance, so its
+        // plan carries no `lazer-source` artifact and asking for one would
+        // refuse a run that owes nothing.
         for source in deployed_lazer_sources(manifest) {
             rows.push(contract(
                 &network,
@@ -399,8 +402,32 @@ pub(crate) fn market_records(
                 "lazer_source",
                 deployment,
                 when,
-                Some(lazer),
+                Some(digest("lazer-source")?),
                 json!({"proxy_runtime": runtime}),
+                None,
+                None,
+                None,
+            ));
+        }
+        // The Chainlink adapter this run deployed, mapped and handed over:
+        // filed under the code it uploaded, with the runtime it prices and
+        // the upstream proxy it reads. No `admin`, as for Lazer rows: when the
+        // registry is written the owner is still the deployer, with a transfer
+        // pending to `oracle.admin` (or `pool.admin` when the config names no
+        // separate one); the run's `handoff.accept` names that account.
+        if let Some(adapter) = real.and_then(|real| real.chainlink_source.as_ref()) {
+            let mut refs = json!({"proxy_runtime": runtime});
+            if let Some(proxy) = real.and_then(|real| real.chainlink_proxy.as_deref()) {
+                refs["feed_proxy"] = json!(proxy);
+            }
+            rows.push(contract(
+                &network,
+                adapter.as_str(),
+                "chainlink_source",
+                deployment,
+                when,
+                Some(digest(crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE)?),
+                refs,
                 None,
                 None,
                 None,
@@ -1357,12 +1384,17 @@ mod tests {
     /// Its frozen plan: the runtime was reused, so there is no proxy-runtime
     /// or proxy-governance artifact; the sources are Lazer sources.
     fn real_plan() -> DeploymentPlan {
+        with_artifact(&real_plan_without_lazer(), "lazer-source", &format!("{:02x}", 11u8).repeat(32))
+    }
+
+    /// The same plan for a market that deployed no Lazer instance: the
+    /// `lazer-source` artifact is absent, as it is for a chainlink-only run.
+    fn real_plan_without_lazer() -> DeploymentPlan {
         let mut plan = fixture_plan();
         for role in ["proxy-runtime", "proxy-governance", "source", "token"] {
             plan.artifacts.remove(role);
         }
-        let digest = |byte: u8| format!("{byte:02x}").repeat(32);
-        with_artifact(&plan, "lazer-source", &digest(11))
+        plan
     }
 
     fn real_rows() -> Vec<Value> {
@@ -1416,6 +1448,109 @@ mod tests {
         assert_eq!(
             row["refs"]["proxy_runtime"],
             serde_json::to_value(&real_manifest().oracle.runtime).expect("runtime as json")
+        );
+    }
+
+    /// A made-up contract id: the adapter is this run's own deployment, so its
+    /// address is whatever the run predicted, never a published one.
+    const CHAINLINK_ADAPTER: &str = "CB3XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XOJMC";
+    const CHAINLINK_PROXY: &str = "CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ";
+
+    /// The same real market, with the Chainlink adapter this run deployed.
+    fn chainlink_manifest() -> MarketManifest {
+        let mut value = serde_json::to_value(real_manifest()).unwrap();
+        value["real"]["chainlink_source"] = json!(CHAINLINK_ADAPTER);
+        value["real"]["chainlink_proxy"] = json!(CHAINLINK_PROXY);
+        serde_json::from_value(value).expect("chainlink market manifest")
+    }
+
+    /// A chainlink run files its adapter as `chainlink_source`, under the code
+    /// it uploaded, with the runtime it prices and the proxy it reads — and no
+    /// `admin`, because the adapter's owner is the pool's oracle
+    /// administrator, which the pool row already names.
+    #[test]
+    fn a_real_market_chainlink_source_is_a_chainlink_source_row_with_our_digest() {
+        let plan = with_artifact(
+            &real_plan(),
+            crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE,
+            &"cd".repeat(32),
+        );
+        let rows = market_records(&chainlink_manifest(), &plan, "market-live-20261027", "2026-10-27")
+            .expect("chainlink market records");
+        let sources: Vec<&Value> =
+            rows.iter().filter(|row| row["role"] == "chainlink_source").collect();
+        assert_eq!(sources.len(), 1, "one adapter, one row: {sources:?}");
+        let row = sources[0];
+        assert_eq!(row["id"], json!(CHAINLINK_ADAPTER));
+        assert_eq!(row["wasm_hash"], json!("cd".repeat(32)), "the code this run uploaded");
+        assert_eq!(row["refs"]["feed_proxy"], json!(CHAINLINK_PROXY));
+        assert_eq!(
+            row["refs"]["proxy_runtime"],
+            serde_json::to_value(&chainlink_manifest().oracle.runtime).expect("runtime as json")
+        );
+        assert!(
+            row.get("admin").is_none(),
+            "the adapter's owner is the pool's oracle administrator: {row}"
+        );
+        // The adapter's code is filed from the launch profile's own tuple.
+        let code = rows
+            .iter()
+            .find(|row| {
+                row["kind"] == "wasm"
+                    && row["artifact"] == json!(crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE)
+            })
+            .expect("the adapter's wasm row");
+        assert_eq!(code["version"], json!("unreleased"));
+    }
+
+    /// A market whose every source is Chainlink deploys no Lazer instance, so
+    /// its frozen plan carries no `lazer-source` artifact. Filing its rows
+    /// must not ask for one: a run that owes no Lazer code is not refused for
+    /// the code it never uploaded.
+    #[test]
+    fn a_chainlink_only_market_files_its_rows_without_a_lazer_artifact() {
+        let mut value = serde_json::to_value(chainlink_manifest()).unwrap();
+        value["real"]["lazer_sources"] = json!([]);
+        value["real"]["proxies"] = json!([]);
+        let manifest: MarketManifest = serde_json::from_value(value).expect("chainlink manifest");
+        let plan = with_artifact(
+            &real_plan_without_lazer(),
+            crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE,
+            &"cd".repeat(32),
+        );
+        assert!(
+            !plan.artifacts.contains_key("lazer-source"),
+            "the fixture must model a plan with no Lazer code: {:?}",
+            plan.artifacts.keys().collect::<Vec<_>>()
+        );
+        let rows = market_records(&manifest, &plan, "market-live-20261027", "2026-10-27")
+            .expect("a chainlink-only market files its rows");
+        assert!(
+            !rows.iter().any(|row| row["role"] == json!("lazer_source")),
+            "no Lazer instance was deployed: {rows:?}"
+        );
+        let adapter = rows
+            .iter()
+            .find(|row| row["role"] == json!("chainlink_source"))
+            .unwrap_or_else(|| panic!("the adapter is filed: {rows:?}"));
+        assert_eq!(adapter["id"], json!(CHAINLINK_ADAPTER));
+        assert_eq!(adapter["wasm_hash"], json!("cd".repeat(32)));
+    }
+
+    /// A market that deploys no adapter files neither row.
+    #[test]
+    fn a_market_without_chainlink_records_no_chainlink_code() {
+        let rows = real_rows();
+        assert!(
+            !rows.iter().any(|row| row["role"] == "chainlink_source"),
+            "a market with no chainlink source files no adapter: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| {
+                row["kind"] == "wasm"
+                    && row["artifact"] == json!(crate::manifest::MARKET_CHAINLINK_SOURCE_ROLE)
+            }),
+            "and no adapter code: {rows:?}"
         );
     }
 

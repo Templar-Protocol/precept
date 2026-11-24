@@ -210,6 +210,15 @@ case "$*" in
         ;;
     *get_owner*) echo '"CC64WBDGS6QQP22QTTIACYIXT3WF7BBQEYOQPLTP7GTKYY7PZ74QYGSL"' ;;
     *has_role*) echo 'true' ;;
+    # A Chainlink feed's own answers, asked of the upstream proxy before any
+    # send: the pair each feed reports and a round a minute old.
+    *description*017be2f55a*) echo '"XLM/USD"' ;;
+    *description*) echo '"USDC/USD"' ;;
+    *latest_round*) echo '{"answer":"1000000000000000000","round_id":1,"timestamp":'"$(( $(date +%s) - 60 ))"'}' ;;
+    # Only the literal `--send no` is a view. A looser pattern would also
+    # swallow a real send whose arguments happen to contain "no", and every
+    # "nothing was sent" assertion in this file rests on that booking.
+    *contract*invoke*"--send no"*) echo 'null' ;;
     *contract*upload*|*contract*deploy*|*contract*install*|*tx*submit*|*transaction*submit*|*contract*invoke*)
         booked
         echo '{"return":"0"}'
@@ -1210,4 +1219,143 @@ fn real_pool_config_owned(dir: &Path, pool_admin: &str) -> PathBuf {
     let path = dir.join("pool.json");
     fs::write(&path, serde_json::to_string_pretty(&spec).unwrap()).unwrap();
     path
+}
+
+/// A pool config whose every reserve quotes a Chainlink feed through one
+/// adapter this run deploys. The proxy is a contract the injected CLI knows,
+/// and it answers each feed with the pair the config declares.
+fn chainlink_pool_config(dir: &Path) -> PathBuf {
+    let mut spec: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(real_pool_config(dir)).unwrap()).unwrap();
+    let block = |data_id: &str, pair: &str| {
+        serde_json::json!({
+            "min_sources": 1,
+            "max_age_secs": 86_400,
+            "sources": [{"kind": "chainlink", "data_id": data_id, "pair": pair}]
+        })
+    };
+    spec["name"] = serde_json::json!("abtest-robot-chainlink");
+    spec["pool"]["name"] = serde_json::json!("Abtest Robot Chainlink");
+    // This run deploys its own adapter, so it names no existing one.
+    spec["pool"]["oracle"] = serde_json::Value::Null;
+    spec["oracle"] = serde_json::json!({
+        "chainlink_proxy": CURATOR_C,
+        "assets": {
+            "usdc": block(
+                "01a80ff216000332000000000000000000000000000000000000000000000000",
+                "USDC/USD"
+            ),
+            "xlm": block(
+                "017be2f55a000332000000000000000000000000000000000000000000000000",
+                "XLM/USD"
+            )
+        }
+    });
+    let path = dir.join("chainlink-pool.json");
+    fs::write(&path, serde_json::to_string_pretty(&spec).unwrap()).unwrap();
+    path
+}
+
+/// The same pool as a market config whose every role is a local file pin: a
+/// run over it deploys its own proxy and adapter from placeholder bytes, so
+/// it resolves no release and reaches no network to print what it prints.
+fn chainlink_market_config(dir: &Path, pool: &Path) -> PathBuf {
+    let mut text = format!(
+        "pool_config = \"{}\"\n\n[network]\n\
+         passphrase = \"Test SDF Network ; September 2015\"\nlabel = \"testnet\"\n\n",
+        pool.display()
+    );
+    for role in [
+        "pool",
+        "backstop",
+        "factory",
+        "adapter",
+        "proxy-runtime",
+        "proxy-governance",
+        "chainlink-sep40-proxy",
+    ] {
+        let path = dir.join(format!("chainlink-{role}.wasm"));
+        let bytes = format!("abtest robot fixture {role} deterministic bytes").into_bytes();
+        fs::write(&path, &bytes).unwrap();
+        text.push_str(&format!(
+            "[artifacts.{role}]\npath = \"{}\"\nsha256 = \"{}\"\n\n",
+            path.display(),
+            sha256_hex(&bytes)
+        ));
+    }
+    // The stack-level shape a real market records: the widest quorum and
+    // freshness any reserve asks for, measured against the pool's usdc leg.
+    text.push_str(
+        "[oracle]\nsources = 1\nmin_sources = 1\nmax_age_secs = 86400\n\
+         max_clock_drift_secs = 0\nbase = \"USD\"\ndecimals = 7\nresolution = 300\n\
+         base_asset = \"CBW5332J2RUTSOIUESSNBNLESPEIEUG6G4LOQOAM6IP3ANORCMN5CPQB\"\n\n\
+         [adapter]\ndecimals = 7\nresolution = 1\nbase = \"USD\"\n\n\
+         [shim]\nblnd_code = \"SHIMBLND\"\nusdc_code = \"SHIMUSDC\"\n",
+    );
+    let path = dir.join("chainlink-market.toml");
+    fs::write(&path, text).unwrap();
+    path
+}
+
+/// A robot plan run over a chainlink market prints one `chainlink_feed` event
+/// per chainlink reserve, each before the `plan` event, and the frozen plan
+/// carries no age: the ages are observations, not plan contents. Every
+/// artifact is a local file pin, so the run needs no release and no network.
+#[test]
+fn robot_chainlink_plan_prints_one_feed_event_per_reserve_before_the_plan() {
+    let (t, _lab) = target("chainlink-feeds");
+    let pool = chainlink_pool_config(&t.dir);
+    let cfg = chainlink_market_config(&t.dir, &pool);
+    let out = t.dir.join("run");
+    let output = run(
+        &t,
+        &deploy_args(
+            cfg.to_str().unwrap(),
+            out.to_str().unwrap(),
+            &[
+                "--admin-config-dir",
+                t.dir.to_str().unwrap(),
+                "--no-registry",
+                "--robot",
+            ],
+        ),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let events = events(&stdout);
+    let feeds: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "chainlink_feed")
+        .collect();
+    assert_eq!(
+        feeds.len(),
+        2,
+        "one event per chainlink reserve: {stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan_at = events
+        .iter()
+        .position(|event| event["event"] == "plan")
+        .unwrap_or_else(|| panic!("the robot prints the plan it asks to approve: {stdout}"));
+    for feed in &feeds {
+        let at = events
+            .iter()
+            .position(|event| std::ptr::eq(event, *feed))
+            .expect("the event is in the stream");
+        assert!(at < plan_at, "a feed event came after the plan: {stdout}");
+        for key in ["reserve", "pair", "round_timestamp", "age_secs", "max_age_secs"] {
+            assert!(!feed[key].is_null(), "a feed event without {key}: {feed}");
+        }
+    }
+    let reserves: Vec<&str> = feeds
+        .iter()
+        .filter_map(|feed| feed["reserve"].as_str())
+        .collect();
+    assert_eq!(reserves, vec!["usdc", "xlm"], "in reserve order: {stdout}");
+    let plan = std::fs::read_to_string(out.join("deployment-plan.toml"))
+        .expect("the run froze a plan");
+    assert!(
+        !plan.contains("age_secs") && !plan.contains("round_timestamp"),
+        "a plan frozen with an age stops reproducing: {plan}"
+    );
+    let _ = fs::remove_dir_all(&t.dir);
 }

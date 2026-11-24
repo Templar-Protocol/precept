@@ -1447,6 +1447,31 @@ fn resolve_wasm_dir(wasm_dir: Option<&Path>) -> anyhow::Result<Option<PathBuf>> 
         .transpose()
 }
 
+/// Printed before the plan, so a reviewer sees how old each Chainlink feed is:
+/// one JSON event per feed under `--robot`, one line each otherwise.
+fn print_chainlink_feeds(deployer: &MarketDeployer, robot: bool) {
+    for feed in deployer.chainlink_feeds() {
+        if robot {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "chainlink_feed",
+                    "reserve": feed.reserve,
+                    "pair": feed.pair,
+                    "round_timestamp": feed.round_timestamp,
+                    "age_secs": feed.age_secs,
+                    "max_age_secs": feed.max_age_secs,
+                })
+            );
+        } else {
+            println!(
+                "chainlink feed {}: {} round {} is {}s old (max {}s)",
+                feed.reserve, feed.pair, feed.round_timestamp, feed.age_secs, feed.max_age_secs
+            );
+        }
+    }
+}
+
 /// One-command real market deployment: the reviewed pool config is the
 /// authority for the pool, its reserves, and its oracle, and the run's
 /// graph comes from that config alone. Nothing here sends: the summary
@@ -1569,6 +1594,7 @@ fn market_deploy_real(
             wasm_dir,
         },
     )?;
+    print_chainlink_feeds(&deployer, robot.robot);
     // The operator authorizes the whole graph, so the run states it before
     // its first confirmation rather than leaving the scope inferred.
     say(format!(
@@ -1635,6 +1661,7 @@ fn market_main(cli: &Cli, cmd: &MarketCmd) -> anyhow::Result<i32> {
             ctx.assert_testnet()?;
             let journal = MarketJournal::open(out.as_path());
             let mut deployer = MarketDeployer::new(cfg, ctx, journal)?;
+            print_chainlink_feeds(&deployer, robot.robot);
             let code = market_drive(&mut deployer, robot)?;
             if code != 0 {
                 return Ok(code);

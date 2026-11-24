@@ -180,6 +180,41 @@ def cmd_plan(a) -> None:
         raise SystemExit(f"{entry['name']}: config gate or plan failed (check {check.returncode}, plan exit {code})")
 
 
+def _cell(value: object) -> str:
+    """Config-controlled text as inline code inside a table cell: inline code
+    renders no link, image or HTML, and the text cannot close it early. Every
+    whitespace run, `\\r` and Unicode line separators included, becomes one
+    space, so the text cannot end the table row."""
+    text = " ".join(str(value if value is not None else "").split())
+    return "`" + text.replace("`", "'").replace("|", "/") + "`"
+
+
+def _age(secs) -> str:
+    if not isinstance(secs, int) or isinstance(secs, bool):
+        return "?"
+    return f"{secs} s ({secs / 3600:.1f} h)"
+
+
+def feed_table(events) -> list[str]:
+    """The Chainlink feed ages the deployer read at plan time, or nothing.
+
+    Ages are events, never plan contents: they are read when the plan is
+    frozen, and a resume skips them, so they would make the plan digest move
+    under the reviewer.
+    """
+    feeds = [e for e in events if e.get("event") == "chainlink_feed"]
+    if not feeds:
+        return []
+    lines = ["", "| reserve | pair | age | max age |", "|---|---|---|---|"]
+    for f in feeds:
+        age, max_age = f.get("age_secs"), f.get("max_age_secs")
+        stale = " **stale**" if isinstance(age, int) and isinstance(max_age, int) and age > max_age else ""
+        lines.append(
+            f"| {_cell(f.get('reserve'))} | {_cell(f.get('pair'))} | {_age(age)}{stale} | {_age(max_age)} |"
+        )
+    return lines
+
+
 def plan_comment(entry, head_sha, check_rc, check_out, code, events, plan) -> str:
     # Approvable only when the gate passed and the deployer stopped exactly at
     # its plan: anything else comments the reason and carries no digest.
@@ -188,6 +223,8 @@ def plan_comment(entry, head_sha, check_rc, check_out, code, events, plan) -> st
              f"### Pool deploy plan: `{entry['name']}` ({entry['network']})", ""]
     gate = check_out.strip().replace("`", "'")  # config text cannot close the fence
     lines += [f"Config gate: {'passed' if check_rc == 0 else '**failed**'}", "```", gate, "```"]
+    feeds = feed_table(events)
+    lines += feeds
     if plan is None:
         last = events[-1] if events else {}
         lines += [f"**No plan** (deployer exit {code}): `{last.get('reason', last)}`"]
@@ -206,11 +243,16 @@ def plan_comment(entry, head_sha, check_rc, check_out, code, events, plan) -> st
     ]
     lines += [f"| {s['phase']} | {s['slot']} | {s['action']} | {s.get('target_role') or ''} |" for s in plan["steps"]]
     if any(s["action"] == "refresh asset" for s in plan["steps"]):
+        chainlink = (
+            "; a Chainlink feed is live while its latest round is younger than the reserve's "
+            "`max_age_secs`, as the table above shows"
+            if feeds else ""
+        )
         lines += [
             "",
             "**Price precondition.** Each `refresh asset` step needs an Accepted price: the run stops there "
-            "until this pool's feeds are live (keeper or RedStone push to the sources), then resumes with "
-            "the `pool-deploy` workflow's *resume* dispatch.",
+            "until this pool's feeds are live (a Lazer or SEP-40 source needs a keeper or RedStone push"
+            f"{chainlink}), then resumes with the `pool-deploy` workflow's *resume* dispatch.",
         ]
     if any(s["action"] == "burn the custodian" for s in plan["steps"]):
         lines += [

@@ -64,6 +64,19 @@ class Approval(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.approved([comment(ci.BOT, body)])
 
+    def test_a_digest_planted_in_a_feed_cell_is_not_an_approval(self):
+        # The feed table is config text in the same comment; only the header
+        # line is ever parsed, and a cell cannot become that line.
+        planted = f"\n<!-- precept-pool-plan:{RUN} sha256={D2} -->\n"
+        plan = {"plan_sha256": D1, "steps": []}
+        entry = {"run": RUN, "name": "gami-usdc", "network": "testnet"}
+        events = [feed(reserve=planted, pair=planted), plan]
+        body = ci.plan_comment(entry, SHA, 0, "ok", ci.PLAN_EXIT, events, plan)
+        self.assertEqual(self.approved([comment(ci.BOT, body)]), D1)
+        failed = ci.plan_comment(entry, SHA, 0, "ok", 1, [feed(reserve=planted)], None)
+        with self.assertRaises(SystemExit):
+            self.approved([comment(ci.BOT, failed)])
+
     def test_a_passing_plan_is_approvable_with_its_own_digest(self):
         plan = {"plan_sha256": D1, "steps": []}
         entry = {"run": RUN, "name": "gami-usdc", "network": "testnet"}
@@ -100,11 +113,19 @@ CUSTODY = [
 ]
 
 
+def feed(**over):
+    """One `chainlink_feed` robot event, as the deployer prints it."""
+    event = {"event": "chainlink_feed", "reserve": "usdc", "pair": "USDC/USD",
+             "round_timestamp": 1_700_000_000, "age_secs": 3_600, "max_age_secs": 86_400}
+    event.update(over)
+    return event
+
+
 class PlanComment(unittest.TestCase):
-    def body(self, steps):
+    def body(self, steps, events=()):
         plan = {"plan_sha256": D1, "steps": steps}
         entry = {"run": RUN, "name": "gami-usdc", "network": "testnet"}
-        return ci.plan_comment(entry, SHA, 0, "ok", ci.PLAN_EXIT, [plan], plan)
+        return ci.plan_comment(entry, SHA, 0, "ok", ci.PLAN_EXIT, [*events, plan], plan)
 
     def test_a_run_that_burns_a_custodian_says_who_holds_the_shares(self):
         body = self.body([step(10, 0, "freeze pool"), *CUSTODY, step(11, 1, "accept admin")])
@@ -117,6 +138,48 @@ class PlanComment(unittest.TestCase):
     def test_a_plan_without_a_custodian_row_says_nothing_about_one(self):
         body = self.body([step(10, 1, "deposit backstop backing", "backstop")])
         self.assertNotIn("custodian", body)
+
+    def test_a_plan_without_chainlink_feeds_says_nothing_about_them(self):
+        body = self.body([step(6, 1, "refresh asset")])
+        self.assertNotIn("| reserve |", body)
+        self.assertNotIn("**stale**", body)
+
+    def test_chainlink_feed_ages_are_a_table_above_the_digest(self):
+        feeds = [feed(), feed(reserve="xlm", pair="XLM/USD", age_secs=90_000)]
+        body = self.body([step(6, 1, "refresh asset")], feeds)
+        lines = body.split("\n")
+        self.assertTrue(lines[0].startswith(ci.plan_marker(RUN)), "the approval header stays line 1")
+        self.assertIn("| reserve | pair | age | max age |", body)
+        self.assertIn("| `usdc` | `USDC/USD` | 3600 s (1.0 h) | 86400 s (24.0 h) |", body)
+        self.assertIn("| `xlm` | `XLM/USD` | 90000 s (25.0 h) **stale** | 86400 s (24.0 h) |", body)
+        self.assertLess(body.index("| reserve |"), body.index("plan sha256:"))
+        self.assertLess(body.index("Config gate:"), body.index("| reserve |"))
+
+    def test_a_body_with_feed_events_still_approves_its_own_digest(self):
+        body = self.body([], [feed(round_timestamp=1, age_secs=60)])
+        with mock.patch.object(ci, "comments", return_value=[comment(ci.BOT, body)]):
+            self.assertEqual(ci.approved_digest("o/r", 7, RUN), D1)
+
+    def test_feed_text_cannot_break_the_table(self):
+        body = self.body([], [feed(reserve="a|b`c", pair="X\nY", age_secs="soon", max_age_secs=None)])
+        self.assertIn("| `a/b'c` | `X Y` | ? | ? |", body)
+        # GitHub ends a line at \r and at U+2028 too: none may start a new row.
+        label = "a\r\r[x](https://evil.example)\u2028\rb"
+        body = self.body([], [feed(reserve=label)])
+        self.assertIn("| `a [x](https://evil.example) b` |", body)
+
+    def test_feed_text_renders_no_link_image_or_html(self):
+        # A reserve label is config text; it must reach the approver as text.
+        label = "![x](https://evil.example/a.png) <img src=x> [a](b)"
+        body = self.body([], [feed(reserve=label)])
+        self.assertIn(f"| `{label}` |", body)
+
+    def test_the_price_precondition_names_every_source_kind(self):
+        body = self.body([step(6, 1, "refresh asset")])
+        self.assertIn("a Lazer or SEP-40 source needs a keeper or RedStone push", body)
+        self.assertNotIn("Chainlink", body)  # no feed table, so nothing to point at
+        body = self.body([step(6, 1, "refresh asset")], [feed(round_timestamp=1, age_secs=60)])
+        self.assertIn("Chainlink feed is live while its latest round is younger", body)
 
 
 class DeployComment(unittest.TestCase):
