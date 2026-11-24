@@ -180,11 +180,13 @@ def cmd_plan(a) -> None:
         raise SystemExit(f"{entry['name']}: config gate or plan failed (check {check.returncode}, plan exit {code})")
 
 
-def _cell(value) -> str:
+def _cell(value: object) -> str:
     """Config-controlled text as inline code inside a table cell: inline code
-    renders no link, image or HTML, and the text cannot close it early."""
-    text = str(value if value is not None else "").replace("`", "'").replace("|", "/").replace("\n", " ").strip()
-    return f"`{text}`"
+    renders no link, image or HTML, and the text cannot close it early. Every
+    whitespace run, `\\r` and Unicode line separators included, becomes one
+    space, so the text cannot end the table row."""
+    text = " ".join(str(value if value is not None else "").split())
+    return "`" + text.replace("`", "'").replace("|", "/") + "`"
 
 
 def _age(secs) -> str:

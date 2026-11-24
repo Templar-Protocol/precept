@@ -150,6 +150,10 @@ class PlanComment(unittest.TestCase):
     def test_feed_text_cannot_break_the_table(self):
         body = self.body([], [feed(reserve="a|b`c", pair="X\nY", age_secs="soon", max_age_secs=None)])
         self.assertIn("| `a/b'c` | `X Y` | ? | ? |", body)
+        # GitHub ends a line at \r and at U+2028 too: none may start a new row.
+        label = "a\r\r[x](https://evil.example)\u2028\rb"
+        body = self.body([], [feed(reserve=label)])
+        self.assertIn("| `a [x](https://evil.example) b` |", body)
 
     def test_feed_text_renders_no_link_image_or_html(self):
         # A reserve label is config text; it must reach the approver as text.
