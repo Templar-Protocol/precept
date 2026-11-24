@@ -181,8 +181,10 @@ def cmd_plan(a) -> None:
 
 
 def _cell(value) -> str:
-    """Config-controlled text, safe inside a table cell."""
-    return str(value if value is not None else "").replace("`", "'").replace("|", "/").replace("\n", " ").strip()
+    """Config-controlled text as inline code inside a table cell: inline code
+    renders no link, image or HTML, and the text cannot close it early."""
+    text = str(value if value is not None else "").replace("`", "'").replace("|", "/").replace("\n", " ").strip()
+    return f"`{text}`"
 
 
 def _age(secs) -> str:

@@ -182,7 +182,9 @@ deploys, the proxy it reads through, and each reserve's feed (`feeds
 usdc=USDC/USD, ...`), so a reviewer sees all three before approving. The gate
 cannot prove a feed prices its reserve's asset: two reserves' feeds swapped are
 each well formed, and each feed's own description matches its pair. It flags a
-feed whose pair's base is not the reserve's label instead.
+feed whose pair's base is not the reserve's label instead, and it flags a
+reserve whose only source is Chainlink, which has no price whenever the feed's
+latest round is older than its `max_age_secs`.
 
 Three more chainlink rules refuse rather than flag:
 

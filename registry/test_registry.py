@@ -601,6 +601,20 @@ class CheckConfigTest(unittest.TestCase):
         self.assertIn("FLAG: oracle.assets.usdc quotes XLM/USD", summary)
         self.assertIn("FLAG: oracle.assets.xlm quotes USDC/USD", summary)
 
+    def test_a_reserve_priced_only_by_chainlink_is_flagged(self):
+        cfg = chainlink_cfg()
+        del cfg["oracle"]["assets"]["xlm"]["sources"][1]  # leave the Chainlink feed alone
+        errs, summary = self.check_cfg(cfg)
+        self.assertEqual(errs, [], "\n".join(errs))
+        self.assertIn("FLAG: oracle.assets.xlm is priced only by Chainlink", summary)
+        self.assertNotIn("oracle.assets.usdc is priced only", summary)
+
+    def test_a_malformed_source_list_is_a_problem_not_a_crash(self):
+        cfg = setp(chainlink_cfg(), "oracle.assets.xlm.sources", 7)
+        errs, summary = self.check_cfg(cfg)
+        self.assertProblem(errs, "oracle.assets.xlm.sources")
+        self.assertIn("feeds usdc=USDC/USD", summary)
+
     def test_a_chainlink_source_needs_the_pools_chainlink_proxy(self):
         cfg = chainlink_cfg()
         del cfg["oracle"]["chainlink_proxy"]
@@ -756,8 +770,11 @@ CL_XLM = "017be2f55a000332000000000000000000000000000000000000000000000000"
 
 
 def chainlink_asset(data_id, pair):
-    return oracle_asset(max_age_secs=86_400,
-                        sources=[{"kind": "chainlink", "data_id": data_id, "pair": pair}])
+    """A reserve quoting a Chainlink feed beside a SEP-40 source, as the docs
+    advise: Chainlink alone leaves the reserve unpriced between rounds."""
+    asset = oracle_asset(max_age_secs=86_400)
+    asset["sources"].insert(0, {"kind": "chainlink", "data_id": data_id, "pair": pair})
+    return asset
 
 
 def chainlink_cfg(**over):

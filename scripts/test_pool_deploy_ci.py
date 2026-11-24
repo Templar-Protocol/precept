@@ -137,8 +137,8 @@ class PlanComment(unittest.TestCase):
         lines = body.split("\n")
         self.assertTrue(lines[0].startswith(ci.plan_marker(RUN)), "the approval header stays line 1")
         self.assertIn("| reserve | pair | age | max age |", body)
-        self.assertIn("| usdc | USDC/USD | 3600 s (1.0 h) | 86400 s (24.0 h) |", body)
-        self.assertIn("| xlm | XLM/USD | 90000 s (25.0 h) **stale** | 86400 s (24.0 h) |", body)
+        self.assertIn("| `usdc` | `USDC/USD` | 3600 s (1.0 h) | 86400 s (24.0 h) |", body)
+        self.assertIn("| `xlm` | `XLM/USD` | 90000 s (25.0 h) **stale** | 86400 s (24.0 h) |", body)
         self.assertLess(body.index("| reserve |"), body.index("plan sha256:"))
         self.assertLess(body.index("Config gate:"), body.index("| reserve |"))
 
@@ -149,7 +149,13 @@ class PlanComment(unittest.TestCase):
 
     def test_feed_text_cannot_break_the_table(self):
         body = self.body([], [feed(reserve="a|b`c", pair="X\nY", age_secs="soon", max_age_secs=None)])
-        self.assertIn("| a/b'c | X Y | ? | ? |", body)
+        self.assertIn("| `a/b'c` | `X Y` | ? | ? |", body)
+
+    def test_feed_text_renders_no_link_image_or_html(self):
+        # A reserve label is config text; it must reach the approver as text.
+        label = "![x](https://evil.example/a.png) <img src=x> [a](b)"
+        body = self.body([], [feed(reserve=label)])
+        self.assertIn(f"| `{label}` |", body)
 
     def test_the_price_precondition_names_every_source_kind(self):
         body = self.body([step(6, 1, "refresh asset")])

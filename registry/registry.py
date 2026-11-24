@@ -710,11 +710,19 @@ def check_config(cfg, network, url):
             )
         # The gate cannot prove a feed prices its reserve's asset, so it shows
         # the mapping and flags a pair whose base is not the reserve's label.
+        # It also flags a reserve priced only by Chainlink: that reserve has no
+        # price whenever its feed's round is older than max_age_secs.
+        assets = oracle.get("assets") if isinstance(oracle.get("assets"), dict) else {}
+        reserves = [
+            (name, [s for s in a["sources"] if isinstance(s, dict)])
+            for name, a in assets.items()
+            if isinstance(a, dict) and isinstance(a.get("sources"), list)
+        ]
         pairs = [
             (name, s["pair"])
-            for name, a in (oracle.get("assets") or {}).items() if isinstance(a, dict)
-            for s in a.get("sources") or []
-            if isinstance(s, dict) and s.get("kind") == "chainlink" and isinstance(s.get("pair"), str)
+            for name, sources in reserves
+            for s in sources
+            if s.get("kind") == "chainlink" and isinstance(s.get("pair"), str)
         ]
         summary += "; feeds " + ", ".join(f"{name}={pair}" for name, pair in pairs)
         for name, pair in pairs:
@@ -722,6 +730,12 @@ def check_config(cfg, network, url):
                 summary += (
                     f"; FLAG: oracle.assets.{name} quotes {pair}, "
                     "confirm that feed prices this reserve's asset before approving"
+                )
+        for name, sources in reserves:
+            if sources and all(s.get("kind") == "chainlink" for s in sources):
+                summary += (
+                    f"; FLAG: oracle.assets.{name} is priced only by Chainlink, so it has no price "
+                    "whenever the feed's latest round is older than its max_age_secs"
                 )
     return errs, summary
 
