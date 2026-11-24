@@ -664,13 +664,6 @@ def check_config(cfg, network, url):
             errs.append("oracle.chainlink_proxy is set but no reserve has a chainlink source")
     elif kinds.get("chainlink") and "chainlink_proxy" not in oracle:
         errs.append("oracle.chainlink_proxy: missing (every chainlink source reads the Chainlink Data Feeds proxy)")
-    if network == "mainnet" and kinds.get("chainlink"):
-        # The deployer reads the audited commit from its launch profile, which
-        # the gate cannot see; enabling mainnet flips both in one change.
-        errs.append(
-            "chainlink sources are refused on mainnet until the deployer's launch profile "
-            "records the adapter's audited commit"
-        )
     if keys:
         try:
             found = fetch(url, [k for _, k, _ in keys.values()])

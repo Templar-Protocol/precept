@@ -708,17 +708,12 @@ class CheckConfigTest(unittest.TestCase):
             f"oracle.chainlink_proxy {other} is not Chainlink's Data Feeds proxy for mainnet ({CL_PROXY})",
         )
 
-    def test_a_chainlink_source_is_refused_on_mainnet(self):
+    def test_a_chainlink_config_on_chainlinks_proxy_passes_on_mainnet(self):
         cfg = chainlink_cfg(network="mainnet")
         cfg["oracle"]["chainlink_proxy"] = CL_PROXY
-        errs = self.cfg_problems(cfg)
-        self.assertProblem(
-            errs,
-            "chainlink sources are refused on mainnet until the deployer's launch profile "
-            "records the adapter's audited commit",
-        )
-        # The canonical proxy itself is not the reason for the refusal.
-        self.assertFalse(any("is not Chainlink's Data Feeds proxy" in e for e in errs), errs)
+        errs, summary = self.check_cfg(cfg)
+        self.assertEqual(errs, [], "\n".join(errs))
+        self.assertIn("feeds usdc=USDC/USD, xlm=XLM/USD", summary)
 
     def test_a_chainlink_proxy_without_a_chainlink_source_is_refused(self):
         for network in ("testnet", "mainnet"):
@@ -779,7 +774,7 @@ def chainlink_asset(data_id, pair):
 
 def chainlink_cfg(**over):
     """A testnet config whose two reserves quote Chainlink feeds through the
-    testnet proxy; mainnet refuses chainlink sources until the adapter is audited."""
+    testnet proxy; a mainnet copy must also name Chainlink's mainnet proxy."""
     cfg = pool_cfg(network="testnet",
                    oracle={"chainlink_proxy": CL_PROXY_TESTNET,
                            "assets": {"usdc": chainlink_asset(CL_USDC, "USDC/USD"),

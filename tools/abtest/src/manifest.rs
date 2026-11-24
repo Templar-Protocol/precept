@@ -2006,14 +2006,18 @@ pub const MARKET_LAUNCH_PROFILE: [LaunchArtifact; 10] = [
             r#"{"asset":"templar_proxy_oracle_soroban_pyth_lazer_source_contract-0.1.0.wasm","repo":"Templar-Protocol/contracts","tag":"templar-proxy-oracle-soroban-pyth-lazer-source-contract-v0.1.0"}"#,
         ),
     },
+    // STUB (draft): both values below are placeholders. Replace `wasm_hash`
+    // with the sha256 of the build reproduced from Chainlink's audited commit,
+    // and `commit` with that 40-hex commit, before this leaves draft.
+    // `the_launch_profile_pins_no_placeholder` fails until both are real.
     LaunchArtifact {
         role: MARKET_CHAINLINK_SOURCE_ROLE,
-        wasm_hash: "bdb671cd3b860dfe9676f892164e87a6c1e40588b6d50a58b5aa4d76c5005913",
+        wasm_hash: "0000000000000000000000000000000000000000000000000000000000000000",
         asset: "data_feeds_sep40_proxy.wasm",
         registry: (
             "chainlink-sep40-proxy",
             "unreleased",
-            r#"{"note":"Chainlink testnet sample adapter CCT6EH2KKCGJCXAF2AXM7P7LLNRRBOKRVB7BJNLX2EBPYHAXGZPSY3F2; audited commit not yet confirmed"}"#,
+            r#"{"commit":"0000000000000000000000000000000000000000","repo":"smartcontractkit/chainlink-stellar"}"#,
         ),
     },
     LaunchArtifact {
@@ -5184,12 +5188,15 @@ mod market_tests {
     }
 
     #[test]
-    fn a_mainnet_chainlink_source_is_refused_until_the_profile_names_an_audited_commit() {
+    fn a_mainnet_chainlink_source_loads_once_the_profile_names_an_audited_commit() {
         let dir = scratch("chainlink-mainnet");
-        let err = format!("{:#}", from_pool_file(&dir, &chainlink_pool(), None).unwrap_err());
+        let mut spec = chainlink_pool();
+        spec["oracle"]["chainlink_proxy"] = serde_json::json!(CHAINLINK_MAINNET_PROXY);
+        let cfg = from_pool_file(&dir, &spec, None)
+            .expect("a mainnet chainlink pool on Chainlink's proxy loads once the profile records the audit");
         assert!(
-            err.contains("Chainlink adapter code has no audited commit in the launch profile"),
-            "a mainnet chainlink pool is refused until the profile records the audit: {err}"
+            cfg.artifacts.contains_key(&ArtifactRole::ChainlinkSep40),
+            "and pins the audited adapter code"
         );
         // The gate is the profile entry's own provenance, and it is a
         // function of the entry it is handed.
@@ -5232,6 +5239,21 @@ mod market_tests {
             "a 40-hex commit is the audit record"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A placeholder digest or commit in the launch profile would pin code no
+    /// network holds, or claim a build nobody reproduced.
+    #[test]
+    fn the_launch_profile_pins_no_placeholder() {
+        let zeros = |s: &str| !s.is_empty() && s.bytes().all(|b| b == b'0');
+        for entry in MARKET_LAUNCH_PROFILE {
+            assert!(!zeros(entry.wasm_hash), "'{}' pins a placeholder digest", entry.role);
+            let (_, _, source) = entry.registry;
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(source) {
+                let commit = value.get("commit").and_then(serde_json::Value::as_str).unwrap_or("");
+                assert!(!zeros(commit), "'{}' records a placeholder commit", entry.role);
+            }
+        }
     }
 
     #[test]

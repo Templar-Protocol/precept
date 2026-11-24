@@ -186,7 +186,7 @@ feed whose pair's base is not the reserve's label instead, and it flags a
 reserve whose only source is Chainlink, which has no price whenever the feed's
 latest round is older than its `max_age_secs`.
 
-Three more chainlink rules refuse rather than flag:
+Two more chainlink rules refuse rather than flag:
 
 - On `mainnet`, `oracle.chainlink_proxy` must be Chainlink's Data Feeds proxy
   (`CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ`); any other
@@ -194,10 +194,6 @@ Three more chainlink rules refuse rather than flag:
   summary.
 - `oracle.chainlink_proxy` set with no reserve declaring a `chainlink` source
   is refused: the proxy would be deployed and read by nothing.
-- `chainlink` sources are refused on `mainnet` until the deployer's launch
-  profile records the adapter's audited commit. The deployer reads that
-  profile and the gate cannot, so the gate refuses every mainnet chainlink
-  config until the same change enables both.
 
 ### Deploying a config
 
