@@ -2904,22 +2904,26 @@ fn is_usd_pair(s: &str) -> bool {
 }
 
 /// Whether the launch profile's Chainlink entry records the audited commit
-/// its bytes were built from: a `"commit"` value of exactly 40 lowercase hex
-/// characters in the entry's registry source JSON. The entry is an argument
-/// rather than a lookup so a test can state the shape it is asking about; the
-/// profile itself is a `const` and cannot be built at test time.
+/// its bytes were built from: `"repo"` is Chainlink's own repository and
+/// `"commit"` is exactly 40 lowercase hex characters, in the entry's registry
+/// source JSON. Nothing here can prove the commit builds `wasm_hash`; the
+/// change that records it reproduces the build in review. The entry is an
+/// argument rather than a lookup so a test can state the shape it is asking
+/// about; the profile itself is a `const` and cannot be built at test time.
 pub fn chainlink_code_audited(entry: &LaunchArtifact) -> bool {
     let (_, _, source) = entry.registry;
     serde_json::from_str::<serde_json::Value>(source)
         .ok()
         .is_some_and(|value| {
-            value
-                .get("commit")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|commit| {
-                    commit.len() == 40
-                        && commit.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-                })
+            value.get("repo").and_then(serde_json::Value::as_str)
+                == Some("smartcontractkit/chainlink-stellar")
+                && value
+                    .get("commit")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|commit| {
+                        commit.len() == 40
+                            && commit.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                    })
         })
 }
 
@@ -5202,12 +5206,22 @@ mod market_tests {
             "a note-only entry records no commit"
         );
         assert!(
-            !chainlink_code_audited(&entry(r#"{"commit":"85a901e8"}"#)),
+            !chainlink_code_audited(&entry(r#"{"repo":"smartcontractkit/chainlink-stellar","commit":"85a901e8"}"#)),
             "a short commit is not a commit"
         );
         assert!(
+            !chainlink_code_audited(&entry(r#"{"commit":"85a901e8b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0"}"#)),
+            "a commit with no repository records no Chainlink build"
+        );
+        assert!(
             !chainlink_code_audited(&entry(
-                r#"{"commit":"85A901E8B0C0D0E0F0A0B0C0D0E0F0A0B0C0D0E0"}"#
+                r#"{"repo":"someone/chainlink-stellar","commit":"85a901e8b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0"}"#
+            )),
+            "a commit from another repository is not Chainlink's"
+        );
+        assert!(
+            !chainlink_code_audited(&entry(
+                r#"{"repo":"smartcontractkit/chainlink-stellar","commit":"85A901E8B0C0D0E0F0A0B0C0D0E0F0A0B0C0D0E0"}"#
             )),
             "an upper-case commit is not the canonical spelling"
         );
