@@ -411,8 +411,10 @@ pub(crate) fn market_records(
         }
         // The Chainlink adapter this run deployed, mapped and handed over:
         // filed under the code it uploaded, with the runtime it prices and
-        // the upstream proxy it reads. No `admin`: the adapter's owner is the
-        // pool's oracle administrator, which the pool row already names.
+        // the upstream proxy it reads. No `admin`, as for Lazer rows: when the
+        // registry is written the owner is still the deployer, with a transfer
+        // pending to `oracle.admin` (or `pool.admin` when the config names no
+        // separate one); the run's `handoff.accept` names that account.
         if let Some(adapter) = real.and_then(|real| real.chainlink_source.as_ref()) {
             let mut refs = json!({"proxy_runtime": runtime});
             if let Some(proxy) = real.and_then(|real| real.chainlink_proxy.as_deref()) {

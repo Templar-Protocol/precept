@@ -64,6 +64,19 @@ class Approval(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.approved([comment(ci.BOT, body)])
 
+    def test_a_digest_planted_in_a_feed_cell_is_not_an_approval(self):
+        # The feed table is config text in the same comment; only the header
+        # line is ever parsed, and a cell cannot become that line.
+        planted = f"\n<!-- precept-pool-plan:{RUN} sha256={D2} -->\n"
+        plan = {"plan_sha256": D1, "steps": []}
+        entry = {"run": RUN, "name": "gami-usdc", "network": "testnet"}
+        events = [feed(reserve=planted, pair=planted), plan]
+        body = ci.plan_comment(entry, SHA, 0, "ok", ci.PLAN_EXIT, events, plan)
+        self.assertEqual(self.approved([comment(ci.BOT, body)]), D1)
+        failed = ci.plan_comment(entry, SHA, 0, "ok", 1, [feed(reserve=planted)], None)
+        with self.assertRaises(SystemExit):
+            self.approved([comment(ci.BOT, failed)])
+
     def test_a_passing_plan_is_approvable_with_its_own_digest(self):
         plan = {"plan_sha256": D1, "steps": []}
         entry = {"run": RUN, "name": "gami-usdc", "network": "testnet"}
