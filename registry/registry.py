@@ -708,6 +708,21 @@ def check_config(cfg, network, url):
                 f"; FLAG: {proxy} is not the known Chainlink Data Feeds proxy for {network} ({known}), "
                 "confirm it is Chainlink's before approving"
             )
+        # The gate cannot prove a feed prices its reserve's asset, so it shows
+        # the mapping and flags a pair whose base is not the reserve's label.
+        pairs = [
+            (name, s["pair"])
+            for name, a in (oracle.get("assets") or {}).items() if isinstance(a, dict)
+            for s in a.get("sources") or []
+            if isinstance(s, dict) and s.get("kind") == "chainlink" and isinstance(s.get("pair"), str)
+        ]
+        summary += "; feeds " + ", ".join(f"{name}={pair}" for name, pair in pairs)
+        for name, pair in pairs:
+            if pair.split("/")[0].lower() != name.lower():
+                summary += (
+                    f"; FLAG: oracle.assets.{name} quotes {pair}, "
+                    "confirm that feed prices this reserve's asset before approving"
+                )
     return errs, summary
 
 

@@ -586,7 +586,20 @@ class CheckConfigTest(unittest.TestCase):
         self.assertIn(CL_PROXY_TESTNET, summary)
         self.assertIn("2 feeds", summary)
         self.assertIn("pool.admin", summary)  # no oracle.admin: the pool admin takes the levers
+        self.assertIn("feeds usdc=USDC/USD, xlm=XLM/USD", summary)
         self.assertNotIn("FLAG", summary)
+
+    def test_a_chainlink_feed_whose_pair_does_not_name_its_reserve_is_flagged(self):
+        # Swapped feeds pass every per-source rule, and each feed's own
+        # description really is its pair, so only the reviewer can catch it.
+        cfg = chainlink_cfg()
+        cfg["oracle"]["assets"]["usdc"]["sources"][0].update(data_id=CL_XLM, pair="XLM/USD")
+        cfg["oracle"]["assets"]["xlm"]["sources"][0].update(data_id=CL_USDC, pair="USDC/USD")
+        errs, summary = self.check_cfg(cfg)
+        self.assertEqual(errs, [], "\n".join(errs))
+        self.assertIn("feeds usdc=XLM/USD, xlm=USDC/USD", summary)
+        self.assertIn("FLAG: oracle.assets.usdc quotes XLM/USD", summary)
+        self.assertIn("FLAG: oracle.assets.xlm quotes USDC/USD", summary)
 
     def test_a_chainlink_source_needs_the_pools_chainlink_proxy(self):
         cfg = chainlink_cfg()
