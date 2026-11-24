@@ -7759,9 +7759,6 @@ impl MarketDeployer {
         live_until_ledger: u32,
     ) -> anyhow::Result<bool> {
         let reader = self.operator_reader();
-        if reader.latest_ledger()? > live_until_ledger {
-            return Ok(false);
-        }
         let key = reader.xdr_encode_scval(&json!({"vec": [{"symbol": "PendingOwner"}]}))?;
         let want = reader.xdr_encode_scval(&json!({"map": [
             {"key": {"symbol": "address"}, "val": {"address": target}},
@@ -7773,6 +7770,11 @@ impl MarketDeployer {
         )? else {
             return Ok(false);
         };
+        // The ledger is read after the entry: a ledger still at or before the
+        // deadline now means the entry was read while it could be accepted.
+        if reader.latest_ledger()? > live_until_ledger {
+            return Ok(false);
+        }
         Ok(crate::stellar::xdr_entry_matches(want.as_str(), &entry.val))
     }
 

@@ -1256,32 +1256,69 @@ fn chainlink_pool_config(dir: &Path) -> PathBuf {
     path
 }
 
-/// A robot plan run over a chainlink config prints one `chainlink_feed` event
+/// The same pool as a market config whose every role is a local file pin: a
+/// run over it deploys its own proxy and adapter from placeholder bytes, so
+/// it resolves no release and reaches no network to print what it prints.
+fn chainlink_market_config(dir: &Path, pool: &Path) -> PathBuf {
+    let mut text = format!(
+        "pool_config = \"{}\"\n\n[network]\n\
+         passphrase = \"Test SDF Network ; September 2015\"\nlabel = \"testnet\"\n\n",
+        pool.display()
+    );
+    for role in [
+        "pool",
+        "backstop",
+        "factory",
+        "adapter",
+        "proxy-runtime",
+        "proxy-governance",
+        "chainlink-sep40-proxy",
+    ] {
+        let path = dir.join(format!("chainlink-{role}.wasm"));
+        let bytes = format!("abtest robot fixture {role} deterministic bytes").into_bytes();
+        fs::write(&path, &bytes).unwrap();
+        text.push_str(&format!(
+            "[artifacts.{role}]\npath = \"{}\"\nsha256 = \"{}\"\n\n",
+            path.display(),
+            sha256_hex(&bytes)
+        ));
+    }
+    // The stack-level shape a real market records: the widest quorum and
+    // freshness any reserve asks for, measured against the pool's usdc leg.
+    text.push_str(
+        "[oracle]\nsources = 1\nmin_sources = 1\nmax_age_secs = 86400\n\
+         max_clock_drift_secs = 0\nbase = \"USD\"\ndecimals = 7\nresolution = 300\n\
+         base_asset = \"CBW5332J2RUTSOIUESSNBNLESPEIEUG6G4LOQOAM6IP3ANORCMN5CPQB\"\n\n\
+         [adapter]\ndecimals = 7\nresolution = 1\nbase = \"USD\"\n\n\
+         [shim]\nblnd_code = \"SHIMBLND\"\nusdc_code = \"SHIMUSDC\"\n",
+    );
+    let path = dir.join("chainlink-market.toml");
+    fs::write(&path, text).unwrap();
+    path
+}
+
+/// A robot plan run over a chainlink market prints one `chainlink_feed` event
 /// per chainlink reserve, each before the `plan` event, and the frozen plan
-/// carries no age: the ages are observations, not plan contents.
+/// carries no age: the ages are observations, not plan contents. Every
+/// artifact is a local file pin, so the run needs no release and no network.
 #[test]
 fn robot_chainlink_plan_prints_one_feed_event_per_reserve_before_the_plan() {
     let (t, _lab) = target("chainlink-feeds");
     let pool = chainlink_pool_config(&t.dir);
+    let cfg = chainlink_market_config(&t.dir, &pool);
     let out = t.dir.join("run");
     let output = run(
         &t,
-        &[
-            "--out",
+        &deploy_args(
+            cfg.to_str().unwrap(),
             out.to_str().unwrap(),
-            "market",
-            "deploy",
-            "--config",
-            pool.to_str().unwrap(),
-            "--network",
-            "testnet",
-            "--admin-identity",
-            "admin",
-            "--admin-config-dir",
-            t.dir.to_str().unwrap(),
-            "--no-registry",
-            "--robot",
-        ],
+            &[
+                "--admin-config-dir",
+                t.dir.to_str().unwrap(),
+                "--no-registry",
+                "--robot",
+            ],
+        ),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let events = events(&stdout);
