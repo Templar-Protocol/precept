@@ -211,8 +211,14 @@ smart account. CI does the rest:
    together with the `check-config` verdict. Nothing is sent and no secret is
    used, so this also runs for PRs from forks. The workflow runs the base
    branch's code; the PR's config is read as data only.
-2. **Review.** Templar reviews the config and the plan; the merge is the
-   approval of exactly that digest.
+2. **Review.** Templar reviews the config and the plan for protocol
+   correctness only: that the contracts will deploy and run the pool as the
+   config describes. The merge approves exactly that digest as a correct
+   deployment. It does not assess or accept the market's economics or risk
+   (assets, factors, caps, interest curve, oracle sources, liquidator
+   coverage); those decisions belong to the curator, as the public
+   [market policy](https://docs.precept.templarfi.org/pool-creators/market-policy.html)
+   states.
 3. **Deploy (`pool-deploy.yml`, on merge).** In the protected `testnet` or
    `mainnet` environment, the same command runs with `--approve-plan
    <digest>`. The deployer re-checks the digest before every send and refuses
