@@ -713,19 +713,17 @@ coordinate stops as a refusal a later resume retries. The proxy's existence on
 the network is still checked on every construction, resume included, because
 that is a network binding rather than a feed read.
 
-The pinned adapter code is Chainlink's own testnet sample (the code its sample
-adapter `CCT6EH2KKCGJCXAF2AXM7P7LLNRRBOKRVB7BJNLX2EBPYHAXGZPSY3F2` runs); nobody
-has yet tied those bytes to Chainlink's audited commit, so a testnet chainlink
-market runs code whose audit is unconfirmed. On mainnet the deployer refuses a
-chainlink config until its launch profile records that audited commit as
-`{"repo":"smartcontractkit/chainlink-stellar","commit":"<40 hex>"}`, and the
-config gate refuses the same configs until the same change flips both. The tool
-cannot prove the commit builds the pinned `wasm_hash`, so the change that
-records it must reproduce that build in review. Mainnet
-also refuses an `oracle.chainlink_proxy` that is not Chainlink's own Data Feeds
-proxy, while testnet accepts any proxy and only flags a different one in the
-gate's summary. The CI run passes no `--wasm-dir`, so the pinned bytes must
-already be on mainnet for it to plan.
+The pinned adapter code is Chainlink's audited build. The launch profile records
+the commit it was built from as
+`{"repo":"smartcontractkit/chainlink-stellar","commit":"<40 hex>"}` beside its
+`wasm_hash`, and the deployer refuses a mainnet chainlink config whose profile
+entry records no such commit. The tool cannot prove the commit builds the
+pinned `wasm_hash`, so any change to that entry must reproduce the build in
+review. Mainnet also refuses an `oracle.chainlink_proxy` that is not
+Chainlink's own Data Feeds proxy, while testnet accepts any proxy and only
+flags a different one in the gate's summary. The CI run passes no
+`--wasm-dir`, so the pinned bytes must already be on the network for it to
+plan.
 
 ### Backstop custody
 
