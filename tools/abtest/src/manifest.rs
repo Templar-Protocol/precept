@@ -2749,7 +2749,30 @@ impl MarketConfig {
                                 .iter()
                                 .find(|a| a.role == MARKET_CHAINLINK_SOURCE_ROLE)
                             {
-                                Some(entry) if chainlink_code_audited(entry) => {}
+                                // The audit vouches for one build: the bytes
+                                // this run deploys must be that build, whatever
+                                // pin form selected them (a market TOML can name
+                                // a file). A File pin's bytes are checked against
+                                // its digest before any send.
+                                Some(entry) if chainlink_code_audited(entry) => {
+                                    match self
+                                        .artifacts
+                                        .get(&ArtifactRole::ChainlinkSep40)
+                                        .map(ArtifactPin::wasm_hash)
+                                    {
+                                        None => {}
+                                        Some(Ok(hash)) if hash.as_str() == entry.wasm_hash => {}
+                                        Some(Ok(hash)) => refusals.push(format!(
+                                            "artifacts.{MARKET_CHAINLINK_SOURCE_ROLE} pins {}, not \
+                                             the audited adapter build {}",
+                                            hash.as_str(),
+                                            entry.wasm_hash
+                                        )),
+                                        Some(Err(err)) => refusals.push(format!(
+                                            "artifacts.{MARKET_CHAINLINK_SOURCE_ROLE}: {err}"
+                                        )),
+                                    }
+                                }
                                 Some(_) => refusals.push(
                                     "Chainlink adapter code has no audited commit in the launch \
                                      profile"
@@ -5199,6 +5222,21 @@ mod market_tests {
         assert!(
             cfg.artifacts.contains_key(&ArtifactRole::ChainlinkSep40),
             "and pins the audited adapter code"
+        );
+        // The audit covers one build, so mainnet refuses any other bytes for
+        // the adapter, here a market file pin with a different digest.
+        let mut other = cfg.clone();
+        other.artifacts.insert(
+            ArtifactRole::ChainlinkSep40,
+            ArtifactPin::File(FilePin {
+                path: dir.join("other.wasm"),
+                sha256: Sha256Hex::try_from("ab".repeat(32)).unwrap(),
+            }),
+        );
+        let err = format!("{:#}", other.validate().unwrap_err());
+        assert!(
+            err.contains("not the audited adapter build"),
+            "mainnet deploys only the audited adapter bytes: {err}"
         );
         // The gate is the profile entry's own provenance, and it is a
         // function of the entry it is handed.
