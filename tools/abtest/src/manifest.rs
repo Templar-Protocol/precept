@@ -2006,18 +2006,20 @@ pub const MARKET_LAUNCH_PROFILE: [LaunchArtifact; 10] = [
             r#"{"asset":"templar_proxy_oracle_soroban_pyth_lazer_source_contract-0.1.0.wasm","repo":"Templar-Protocol/contracts","tag":"templar-proxy-oracle-soroban-pyth-lazer-source-contract-v0.1.0"}"#,
         ),
     },
-    // STUB (draft): both values below are placeholders. Replace `wasm_hash`
-    // with the sha256 of the build reproduced from Chainlink's audited commit,
-    // and `commit` with that 40-hex commit, before this leaves draft.
-    // `the_launch_profile_pins_no_placeholder` fails until both are real.
+    // Chainlink's SEP-40 adapter, the build Chainlink deployed on mainnet and
+    // testnet. Reproduced byte for byte from `commit` with Rust 1.96.0 (the
+    // repo's rust-toolchain.toml) and Stellar CLI 27.0.0:
+    // `stellar contract build --package data-feeds-sep40-proxy
+    //   --meta source_repo=github:smartcontractkit/chainlink-stellar`
+    // in `contracts/data-feeds`. Any change here must reproduce the build again.
     LaunchArtifact {
         role: MARKET_CHAINLINK_SOURCE_ROLE,
-        wasm_hash: "0000000000000000000000000000000000000000000000000000000000000000",
+        wasm_hash: "b1b6ce1de228fa92f427e0a046ffe54672faa78db12bd7b9e1633c19a80a5e22",
         asset: "data_feeds_sep40_proxy.wasm",
         registry: (
             "chainlink-sep40-proxy",
             "unreleased",
-            r#"{"commit":"0000000000000000000000000000000000000000","repo":"smartcontractkit/chainlink-stellar"}"#,
+            r#"{"commit":"a6219c3614c4e6aae9677e0cb77cdee044ef3ca3","repo":"smartcontractkit/chainlink-stellar"}"#,
         ),
     },
     LaunchArtifact {
@@ -5202,7 +5204,7 @@ mod market_tests {
         // function of the entry it is handed.
         let entry = |source: &'static str| LaunchArtifact {
             role: MARKET_CHAINLINK_SOURCE_ROLE,
-            wasm_hash: "bdb671cd3b860dfe9676f892164e87a6c1e40588b6d50a58b5aa4d76c5005913",
+            wasm_hash: "b1b6ce1de228fa92f427e0a046ffe54672faa78db12bd7b9e1633c19a80a5e22",
             asset: "data_feeds_sep40_proxy.wasm",
             registry: ("chainlink-sep40-proxy", "unreleased", source),
         };
