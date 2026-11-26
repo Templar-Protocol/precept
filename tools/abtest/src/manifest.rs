@@ -2752,15 +2752,18 @@ impl MarketConfig {
                                 // The audit vouches for one build: the bytes
                                 // this run deploys must be that build, whatever
                                 // pin form selected them (a market TOML can name
-                                // a file). A File pin's bytes are checked against
-                                // its digest before any send.
+                                // a file), and a pin must exist to compare. A
+                                // File pin's bytes are re-hashed against its
+                                // digest at preflight and again before upload.
                                 Some(entry) if chainlink_code_audited(entry) => {
                                     match self
                                         .artifacts
                                         .get(&ArtifactRole::ChainlinkSep40)
                                         .map(ArtifactPin::wasm_hash)
                                     {
-                                        None => {}
+                                        None => refusals.push(format!(
+                                            "artifacts.{MARKET_CHAINLINK_SOURCE_ROLE} is not pinned"
+                                        )),
                                         Some(Ok(hash)) if hash.as_str() == entry.wasm_hash => {}
                                         Some(Ok(hash)) => refusals.push(format!(
                                             "artifacts.{MARKET_CHAINLINK_SOURCE_ROLE} pins {}, not \
@@ -5237,6 +5240,14 @@ mod market_tests {
         assert!(
             err.contains("not the audited adapter build"),
             "mainnet deploys only the audited adapter bytes: {err}"
+        );
+        // And it refuses a config with no adapter pin to compare at all.
+        let mut unpinned = cfg.clone();
+        unpinned.artifacts.remove(&ArtifactRole::ChainlinkSep40);
+        let err = format!("{:#}", unpinned.validate().unwrap_err());
+        assert!(
+            err.contains("artifacts.chainlink-sep40-proxy is not pinned"),
+            "an unpinned mainnet adapter is refused: {err}"
         );
         // The gate is the profile entry's own provenance, and it is a
         // function of the entry it is handed.
