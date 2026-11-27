@@ -53,9 +53,10 @@ SOURCE_KINDS = ("lazer", "sep40", "mock", "chainlink")
 # the reserve's own asset, so these three belong to the other kinds.
 CHAINLINK_FIELDS = {"kind", "data_id", "pair"}
 CHAINLINK_FORBIDDEN = ("contract", "asset", "feed_id")
-# The deployer's own rule (`is_usd_pair`): an upper-case base of at most 16
-# characters, quoted in USD. The gate must not be looser than the deployer.
-CHAINLINK_PAIR = re.compile(r"[A-Z0-9]{1,16}/USD\Z")
+# The deployer's own rule (`is_chainlink_pair`): an upper-case base of at most
+# 16 characters, quoted in USD, or a net-asset-value feed's "<BASE> NAV"
+# description. The gate must not be looser than the deployer.
+CHAINLINK_PAIR = re.compile(r"[A-Z0-9]{1,16}(?:/USD| NAV)\Z")
 # The Chainlink Data Feeds proxy each network's feeds live behind. Mainnet
 # refuses any other `oracle.chainlink_proxy`; testnet flags it in the summary.
 CHAINLINK_PROXIES = {
@@ -569,7 +570,7 @@ def _check_chainlink_source(errs, at, name, s, runtime, feeds):
             feeds[data_id] = name
     pair = _get(errs, s, "pair", at, str)
     if pair is not None and not CHAINLINK_PAIR.match(pair):
-        errs.append(f"{at}.pair: {pair!r} is not <BASE>/USD (uppercase letters and digits quoted in USD)")
+        errs.append(f"{at}.pair: {pair!r} is not <BASE>/USD or <BASE> NAV (uppercase letters and digits)")
     if runtime is not None:
         errs.append(
             f"{at}: a chainlink source needs the pool's own proxy runtime, but oracle.runtime is set; "
@@ -703,8 +704,10 @@ def check_config(cfg, network, url):
             )
         # The gate cannot prove a feed prices its reserve's asset, so it shows
         # the mapping and flags a pair whose base is not the reserve's label.
-        # It also flags a reserve priced only by Chainlink: that reserve has no
-        # price whenever its feed's round is older than max_age_secs.
+        # A NAV feed's description names no quote currency, so the gate flags
+        # it for a reviewer to confirm in Chainlink's feed list. It also flags
+        # a reserve priced only by Chainlink: that reserve has no price
+        # whenever its feed's round is older than max_age_secs.
         assets = oracle.get("assets") if isinstance(oracle.get("assets"), dict) else {}
         reserves = [
             (name, [s for s in a["sources"] if isinstance(s, dict)])
@@ -719,10 +722,15 @@ def check_config(cfg, network, url):
         ]
         summary += "; feeds " + ", ".join(f"{name}={pair}" for name, pair in pairs)
         for name, pair in pairs:
-            if pair.split("/")[0].lower() != name.lower():
+            if re.split(r"[/ ]", pair)[0].lower() != name.lower():
                 summary += (
                     f"; FLAG: oracle.assets.{name} quotes {pair}, "
                     "confirm that feed prices this reserve's asset before approving"
+                )
+            if pair.endswith(" NAV"):
+                summary += (
+                    f"; FLAG: oracle.assets.{name} quotes a NAV feed ({pair}), "
+                    "confirm in Chainlink's feed list that it is quoted in USD"
                 )
         for name, sources in reserves:
             if sources and all(s.get("kind") == "chainlink" for s in sources):

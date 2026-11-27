@@ -668,16 +668,18 @@ unfinished.
 ### Chainlink price sources
 
 A reserve may quote Chainlink Data Feeds instead of a SEP-40 contract of its
-own: `{"kind": "chainlink", "data_id": "<64 hex>", "pair": "<BASE>/USD"}`,
-with the `oracle` block naming the Chainlink Data Feeds proxy those feeds live
-behind (`oracle.chainlink_proxy`). Such a pool gets one `DataFeedsSep40Proxy`
-adapter of its own, deployed from the digest-pinned `chainlink-sep40-proxy`
-artifact: the run deploys it, maps each reserve's feed with `add_feed`, wires
-it into the pool's own proxy runtime as that asset's source, and hands its
-ownership to `oracle.admin` (or `pool.admin` when the config names no separate
-one) with the rest of the hand-off. The kind is refused on a pool that reuses
-a shared runtime (`oracle.runtime` set); reference a Chainlink-owned adapter
-with `kind: "sep40"` there instead. A `chainlink_proxy` named with no reserve
+own: `{"kind": "chainlink", "data_id": "<64 hex>", "pair": "<BASE>/USD"}`, or
+`"pair": "<BASE> NAV"` for a USD net-asset-value feed whose on-chain
+description is that (`USPC NAV`), with the `oracle` block naming the Chainlink
+Data Feeds proxy those feeds live behind (`oracle.chainlink_proxy`). Such a
+pool gets one `DataFeedsSep40Proxy` adapter of its own, deployed from the
+digest-pinned `chainlink-sep40-proxy` artifact: the run deploys it, maps each
+reserve's feed with `add_feed`, wires it into the pool's own proxy runtime as
+that asset's source, and hands its ownership to `oracle.admin` (or
+`pool.admin` when the config names no separate one) with the rest of the
+hand-off. The kind is refused on a pool that reuses a shared runtime
+(`oracle.runtime` set); reference a Chainlink-owned adapter with
+`kind: "sep40"` there instead. A `chainlink_proxy` named with no reserve
 declaring a `chainlink` source is refused too: the run would deploy and
 configure an adapter nothing reads.
 

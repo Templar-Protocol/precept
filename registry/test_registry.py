@@ -641,12 +641,26 @@ class CheckConfigTest(unittest.TestCase):
             self.assertProblem(errs, "oracle.assets.usdc.sources[0].data_id")
         self.assertEqual(self.cfg_problems(setp(chainlink_cfg(), "oracle.assets.usdc.sources.0.data_id", "f" * 64)), [])
 
-    def test_a_chainlink_source_names_a_usd_pair(self):
+    def test_a_chainlink_source_names_a_usd_or_nav_pair(self):
         for bad in ("USDC", "usdc/USD", "USDC/usd", "USDC/USDT", "/USD", "USDC/USD\n", "USDC-USD",
-                    "A" * 17 + "/USD"):
+                    "A" * 17 + "/USD", "NAV", " NAV", "usdc NAV", "USDC  NAV", "USDC NAV/USD",
+                    "USDC/USD NAV", "USDC NAV\n"):
             errs = self.cfg_problems(setp(chainlink_cfg(), "oracle.assets.usdc.sources.0.pair", bad))
             self.assertProblem(errs, "oracle.assets.usdc.sources[0].pair")
-        self.assertEqual(self.cfg_problems(setp(chainlink_cfg(), "oracle.assets.usdc.sources.0.pair", "BTC/USD")), [])
+        for good in ("BTC/USD", "USPC NAV"):
+            self.assertEqual(self.cfg_problems(setp(chainlink_cfg(), "oracle.assets.usdc.sources.0.pair", good)), [])
+
+    def test_a_nav_feed_is_flagged_for_its_quote_and_named_by_its_base(self):
+        # A NAV description carries no quote currency, so the reviewer confirms
+        # it; its base still names the reserve, so no mapping flag.
+        cfg = chainlink_cfg()
+        cfg["oracle"]["assets"]["xlm"]["sources"][0]["pair"] = "XLM NAV"
+        errs, summary = self.check_cfg(cfg)
+        self.assertEqual(errs, [], "\n".join(errs))
+        self.assertIn("feeds usdc=USDC/USD, xlm=XLM NAV", summary)
+        self.assertIn("FLAG: oracle.assets.xlm quotes a NAV feed (XLM NAV)", summary)
+        self.assertNotIn("oracle.assets.xlm quotes XLM NAV", summary)
+        self.assertNotIn("oracle.assets.usdc quotes a NAV feed", summary)
 
     def test_a_chainlink_source_takes_no_contract_asset_or_feed_id(self):
         for key, value in (("contract", registry.strkey_encode("C", b"\x99" * 32)),
