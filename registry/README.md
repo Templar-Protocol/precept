@@ -169,11 +169,14 @@ the deploy costs a day.
 the admins) is the Chainlink Data Feeds proxy a pool's `chainlink` sources read
 through. A source of that kind names its feed and pair only:
 
-    {"kind": "chainlink", "data_id": "<64 lowercase hex>", "pair": "<BASE>/USD"}
+    {"kind": "chainlink", "data_id": "<64 lowercase hex>", "pair": "<BASE>/USD" | "<BASE> NAV"}
 
 The adapter keys the feed by the reserve's own asset, so a `chainlink` source
 takes no `contract`, `asset` or `feed_id`; `data_id` is 64 lowercase hex and
-`pair` is uppercase letters and digits quoted in USD (`USDC/USD`, `XLM/USD`).
+`pair` is the feed's own on-chain description, which the deployer compares
+exactly before any send: uppercase letters and digits quoted in USD
+(`USDC/USD`, `XLM/USD`), or a net-asset-value feed's `<BASE> NAV` (`USPC NAV`),
+whose description names no quote currency.
 A reserve quotes Chainlink at most once, two reserves never share a `data_id`,
 and the kind is refused on a pool that reuses a shared runtime
 (`oracle.runtime` set) — reference a Chainlink-owned adapter with
@@ -182,9 +185,11 @@ deploys, the proxy it reads through, and each reserve's feed (`feeds
 usdc=USDC/USD, ...`), so a reviewer sees all three before approving. The gate
 cannot prove a feed prices its reserve's asset: two reserves' feeds swapped are
 each well formed, and each feed's own description matches its pair. It flags a
-feed whose pair's base is not the reserve's label instead, and it flags a
-reserve whose only source is Chainlink, which has no price whenever the feed's
-latest round is older than its `max_age_secs`.
+feed whose pair's base is not the reserve's label instead. It flags every NAV
+feed, for the reviewer to confirm in Chainlink's feed list that it is quoted in
+USD, the oracle's base. And it flags a reserve whose only source is Chainlink,
+which has no price whenever the feed's latest round is older than its
+`max_age_secs`.
 
 Two more chainlink rules refuse rather than flag:
 

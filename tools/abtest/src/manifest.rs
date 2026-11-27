@@ -1557,9 +1557,10 @@ pub struct OracleSource {
     /// reserve's own asset, so the id never becomes an asset key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_id: Option<String>,
-    /// `Chainlink`: the pair the feed must report, `"<BASE>/USD"`. Preflight
-    /// asks the upstream proxy for the feed's description and refuses a
-    /// mismatch before any send, so a typo cannot map the wrong feed.
+    /// `Chainlink`: the feed's own description, `"<BASE>/USD"` or a USD
+    /// net-asset-value feed's `"<BASE> NAV"`. Preflight asks the upstream
+    /// proxy for that description and refuses a mismatch before any send, so a
+    /// typo cannot map the wrong feed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pair: Option<String>,
 }
@@ -2720,9 +2721,9 @@ impl MarketConfig {
                             anyhow!("{at} is a Chainlink feed and must name the pair it reports")
                         })?;
                         anyhow::ensure!(
-                            is_usd_pair(pair),
-                            "{at} must name the pair its feed reports as \"<BASE>/USD\", not \
-                             '{pair}'"
+                            is_chainlink_pair(pair),
+                            "{at} must name the pair its feed reports as \"<BASE>/USD\" or \
+                             \"<BASE> NAV\", not '{pair}'"
                         );
                         anyhow::ensure!(
                             source.contract.is_none()
@@ -2924,15 +2925,20 @@ fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// A Chainlink feed's declared pair: an upper-case base symbol and the USD
-/// quote the adapter's own base is. The adapter reports `"<BASE>/USD"` from
-/// its upstream proxy, and preflight compares the two exactly.
-fn is_usd_pair(s: &str) -> bool {
-    s.strip_suffix("/USD").is_some_and(|base| {
-        !base.is_empty()
-            && base.len() <= 16
-            && base.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-    })
+/// A Chainlink feed's declared pair, which preflight compares exactly with the
+/// feed's on-chain description: an upper-case base symbol and either the USD
+/// quote the adapter's own base is (`"XLM/USD"`), or `" NAV"` for a
+/// net-asset-value feed, whose description carries no quote (`"USPC NAV"`).
+/// Chainlink's NAV feeds on Stellar quote USD; the config gate flags every NAV
+/// pair so a reviewer confirms that for the feed in hand.
+fn is_chainlink_pair(s: &str) -> bool {
+    s.strip_suffix("/USD")
+        .or_else(|| s.strip_suffix(" NAV"))
+        .is_some_and(|base| {
+            !base.is_empty()
+                && base.len() <= 16
+                && base.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        })
 }
 
 /// Whether the launch profile's Chainlink entry records the audited commit
@@ -5153,11 +5159,19 @@ mod market_tests {
             serde_json::json!("017be2f5");
         let err = format!("{:#}", from_pool_file(&dir, &short, None).unwrap_err());
         assert!(err.contains("64 lowercase hex characters"), "{err}");
-        // So is a pair that is not `<BASE>/USD`.
-        let mut pair = chainlink_pool_testnet();
-        pair["oracle"]["assets"]["xlm"]["sources"][0]["pair"] = serde_json::json!("XLM/EUR");
-        let err = format!("{:#}", from_pool_file(&dir, &pair, None).unwrap_err());
-        assert!(err.contains("must name the pair its feed reports"), "{err}");
+        // So is a pair that is neither `<BASE>/USD` nor `<BASE> NAV`.
+        for bad in ["XLM/EUR", "XLM NAV/USD", "xlm NAV", "XLM  NAV", "NAV", " NAV", "XLM/USD NAV"] {
+            let mut pair = chainlink_pool_testnet();
+            pair["oracle"]["assets"]["xlm"]["sources"][0]["pair"] = serde_json::json!(bad);
+            let err = format!("{:#}", from_pool_file(&dir, &pair, None).unwrap_err());
+            assert!(err.contains("must name the pair its feed reports"), "'{bad}': {err}");
+        }
+        // A USD net-asset-value feed is named by its own description.
+        let mut nav = chainlink_pool_testnet();
+        nav["oracle"]["assets"]["xlm"]["sources"][0]["pair"] = serde_json::json!("USPC NAV");
+        let cfg = from_pool_file(&dir, &nav, None).expect("a NAV feed's description is a pair");
+        let pool = cfg.pool.as_ref().expect("the pool is the config");
+        assert_eq!(pool.reserves[1].sources[0].pair.as_deref(), Some("USPC NAV"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
