@@ -1,0 +1,112 @@
+{
+  "name": "uspc-usdc",
+  "network": "mainnet",
+  "proposed_by": "Gami Labs (USPC/USDC launch parameters, 2026-11-27)",
+  "pool": {
+    "admin": "GBC7HYZNLGNOICHXWENZFS4GFMWJ3Y5AK4WSBEJPW7J3PH4QWHYDV3NB",
+    "name": "Precept USPC/USDC",
+    "oracle": null,
+    "backstop_take_rate": 0,
+    "max_positions": 10,
+    "min_collateral": "10000000000"
+  },
+  "reserves": [
+    {
+      "asset": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+      "label": "usdc",
+      "config": {
+        "index": 0,
+        "decimals": 7,
+        "c_factor": 0,
+        "l_factor": 10000000,
+        "util": 9000000,
+        "max_util": 9500000,
+        "r_base": 1000,
+        "r_one": 499000,
+        "r_two": 750000,
+        "r_three": 750000,
+        "reactivity": 50,
+        "supply_cap": "400000000000000",
+        "min_position": "10000000",
+        "enabled": true
+      }
+    },
+    {
+      "asset": "CCIMELDVXPSNVYLMZB3YA7X52IIETA63PLHBVQJGQW3WSGEKHUC3EAPC",
+      "label": "uspc",
+      "config": {
+        "index": 1,
+        "decimals": 7,
+        "c_factor": 9000000,
+        "l_factor": 0,
+        "util": 8000000,
+        "max_util": 9000000,
+        "r_base": 1000,
+        "r_one": 0,
+        "r_two": 0,
+        "r_three": 0,
+        "reactivity": 0,
+        "supply_cap": "500000000000000",
+        "min_position": "100000000",
+        "enabled": true
+      }
+    }
+  ],
+  "target_status": 0,
+  "notes": [
+    "NOT LIVE: do not deposit into, borrow from or loop against this pool until its contracts appear in mainnet.jsonl and the launch is announced.",
+    "oracle: its own runtime. USDC from Chainlink's USDC/USD feed, Templar's Pyth Lazer source (feed 7) and the RedStone wrapper. USPC from Chainlink's USPC NAV feed alone (Coinshift USPC net asset value in USD; no other source carries USPC).",
+    "USPC NAV publishes one round every 86400-86415 s (rounds 13-38, measured on mainnet 2026-11-27), and both max_age_secs (86400, the largest the gate allows) and the pool's own price check refuse a price older than 86400 s. USPC therefore has no valid price from 24 h after each round until the keeper refreshes after the next round lands: seconds plus the keeper interval, once a day. In that window borrows, collateral withdrawals and liquidations that need the USPC price stop.",
+    "USPC is priced at NAV, not at a market price: the pool values USPC collateral at the issuer's reported net asset value even if USPC trades below it.",
+    "pool.admin is GBC7HYZNLGNOICHXWENZFS4GFMWJ3Y5AK4WSBEJPW7J3PH4QWHYDV3NB (to confirm). The config names no oracle.admin, so the same account also takes this pool's oracle: runtime governance Admin and ownership of the Chainlink adapter. The deploy run holds every role under the CI deployer key until setup completes, then hands over: pool admin (also the Comet controller) via propose_admin/accept_admin; runtime governance Admin via SetRole; the Chainlink adapter via transfer_ownership/accept_ownership. The account must exist on mainnet before the config gate passes, and signs both accept_* calls after the run.",
+    "The Chainlink adapter's owner can upgrade it, change or remove its feeds, point it at another upstream proxy and recover tokens sent to it, directly and with no waiting time; ownership cannot be renounced.",
+    "pool: arguments to PoolFactory.deploy (salt is chosen at deploy time). oracle is a pool_oracle_adapter over a Templar proxy runtime.",
+    "min_collateral is effective (c_factor-weighted) collateral in 7-decimal oracle base units: 10000000000 = 1,000 USD.",
+    "usdc IRM at ir_mod = 1: 0.01% at U=0 (r_base 1000 is the contract minimum), 5.00% at 90%, 12.50% at 95%, 20.00% at 100% (r_three is not scaled by ir_mod). reactivity 50 moves ir_mod (bounded 0.1x-10x) by 0.432 x (U - 90%) per day.",
+    "Borrows stop at max_util 95%; withdrawals may push U to just under 100%, which is where r_three applies.",
+    "uspc is the Stellar asset USPC issued by GARSY67GO23LDNMWLB5CWW7E6AGHGPU5TCDZF4EYO5UMBV4V4R5FRBO2 (its Stellar Asset Contract), 7 decimals. Collateral only; r_base 1000 is the contract minimum. min_position = 10 USPC. Liquidation incentive tops out at (1 - c_factor) / 2 = 5%.",
+    "Immutable after setup: update_pool is disabled and reserves only accept disabling, so caps, IRM, factors, max_positions and min_collateral are permanent.",
+    "set_status 0 checks the backstop threshold; it is met by this pool's own activation stack (own factory, Comet, emissions-disabled backstop and synthetic no-value BLND/USDC legs), not real capital."
+  ],
+  "oracle": {
+    "chainlink_proxy": "CDQBHEUGLDHMSUHG4IH33RJBUTMNCZOT4JIAQR4WZFRDZW6DR6S32ZLZ",
+    "assets": {
+      "usdc": {
+        "min_sources": 1,
+        "max_age_secs": 86400,
+        "sources": [
+          {
+            "kind": "chainlink",
+            "data_id": "01a80ff216000332000000000000000000000000000000000000000000000000",
+            "pair": "USDC/USD"
+          },
+          {
+            "kind": "sep40",
+            "contract": "CDXOHZDLLF6AMQ5NLZQOWRSBQIJBFPC4KWQ6SOLKQSQOP2EYDQC4E5IB",
+            "asset": {
+              "Other": "7"
+            }
+          },
+          {
+            "kind": "sep40",
+            "contract": "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
+            "asset": {
+              "Stellar": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+            }
+          }
+        ]
+      },
+      "uspc": {
+        "min_sources": 1,
+        "max_age_secs": 86400,
+        "sources": [
+          {
+            "kind": "chainlink",
+            "data_id": "016e06407e000332000000000000000000000000000000000000000000000000",
+            "pair": "USPC NAV"
+          }
+        ]
+      }
+    }
+  }
+}
