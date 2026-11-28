@@ -1,0 +1,49 @@
+name: sign-tests
+# The sign page's tests (sign/test/*.test.mjs, run by `bun test` in sign/) had no
+# CI: pages-sign.yml deploys the page after merge with sign/test removed and never
+# runs the suite, and pull_request.yml ignores sign/** because no job there reads
+# it. This workflow runs the suite on pull requests into main that touch sign/**
+# (or this file), and on the same changes pushed to main, so a regression in the
+# signing flows is caught before it ships. sign/ has vendored dependencies
+# (sign/vendor, checksums in sign/vendor/SHA256SUMS) and no package.json, so no
+# install step runs. Every action is pinned to a full commit SHA — tags move,
+# SHAs do not:
+#
+#   actions/checkout     v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1
+#   oven-sh/setup-bun    v2.2.0  0c5077e51419868618aeaa5fe8019c62421857d6
+#
+# bun's default test discovery matches the *.test.mjs files and not the
+# testnet-rehearsal.mjs helper, which makes no network calls part of this job.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - sign/**
+      - .github/workflows/sign-tests.yml
+  push:
+    branches:
+      - main
+    paths:
+      - sign/**
+      - .github/workflows/sign-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Run the sign tests
+        working-directory: sign
+        run: bun test
