@@ -1,0 +1,74 @@
+name: sign-tests
+# The sign page's tests (sign/test/*.test.mjs, run by `bun test` in sign/) had no
+# CI. pages-sign.yml, the only workflow that touches sign/, triggers on push to
+# main and workflow_dispatch, copies sign/ to _site/sign/ with sign/test removed,
+# and runs no test command. pull_request.yml has no job that reads sign/ and no
+# paths filter that selects it, so its gate builds the Rust workspace on a sign/
+# change and never runs this suite. This workflow runs it on pull requests into
+# main that touch sign/** (or this file), so a regression in the signing flows is
+# caught before merge, and again on the same changes pushed to main. The push run
+# is a signal after the fact: pages-sign.yml deploys in parallel and does not wait
+# for it.
+#
+# sign/ has vendored dependencies (sign/vendor, checksums in
+# sign/vendor/SHA256SUMS) and no package.json, so no install step runs.
+#
+# The suite runs inside a network namespace with no interface but loopback, so a
+# test that opens a socket to anything else fails the run instead of depending
+# on an external service. Under that isolation all 261 tests pass, so the suite
+# needs no network today: `unshare -n bun test` in sign/ passes, and a probe
+# connecting to 1.1.1.1:443 in the same namespace fails with ECONNREFUSED.
+# `sudo` is required because unsharing the network stack needs CAP_SYS_ADMIN;
+# the runner grants passwordless sudo to its user, and this job holds no secret
+# and no write permission for the repository.
+#
+# Every action is pinned to a full commit SHA — tags move, SHAs do not — and the
+# Bun runtime is pinned with it, because the installer's SHA pins only the
+# installer, not the runtime it downloads:
+#
+#   actions/checkout     v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1
+#   oven-sh/setup-bun    v2.2.0  0c5077e51419868618aeaa5fe8019c62421857d6
+#   Bun runtime          1.4.2   bun-version
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - sign/**
+      - .github/workflows/sign-tests.yml
+  push:
+    branches:
+      - main
+    paths:
+      - sign/**
+      - .github/workflows/sign-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Run the sign tests, isolated from the network
+        working-directory: sign
+        run: |
+          set -euo pipefail
+          # sudo does not inherit this step's PATH (the first isolated run failed with
+          # "unshare: failed to execute bun: No such file or directory"), so resolve it here
+          BUN="$(command -v bun)"
+          # the namespace must actually have no route out, or the isolation claim is false
+          sudo unshare --net ip route | (! grep -q .)
+          sudo unshare --net "$BUN" test
