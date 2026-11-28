@@ -4,7 +4,7 @@ name: pull_request
 # can reach what it builds or proves. A change skips it when every touched file
 # matches paths-ignore: documentation, and the parts of the repository that no
 # job here reads and that have their own gate: the registry and its configs
-# (registry.yml, pool-plan.yml), the deployer in tools/abtest (abtest.yml), the
+# (registry.yml), the deployer in tools/abtest (abtest.yml), the
 # signing page in sign/ (pages-sign.yml), the docs checker (docs.yml), and the
 # abtest, docs, pages-sign and registry workflow files. No contract crate reads
 # these paths; the deployer consumes built wasm, it does not compile the
