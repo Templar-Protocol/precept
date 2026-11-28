@@ -5,7 +5,8 @@ name: pull_request
 # matches paths-ignore: documentation, and parts of the repository that no job
 # here reads. These have their own pull request gate: the registry and its
 # configs, plus the deploy helper scripts/pool_deploy_ci.py and its test
-# (registry.yml, which runs on every pull request and runs that test); the
+# (registry.yml, whose pull_request trigger has no paths filter, so it runs on
+# every pull request and runs that test; only its push trigger is path-filtered); the
 # deployer in tools/abtest (abtest.yml); the docs checker scripts/check_docs.py
 # and its test (docs.yml); and those workflow files. The signing page in sign/
 # and pages-sign.yml have none: the `on:` block of pages-sign.yml is push to
