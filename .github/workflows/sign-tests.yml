@@ -1,11 +1,14 @@
 name: sign-tests
 # The sign page's tests (sign/test/*.test.mjs, run by `bun test` in sign/) had no
-# CI: pages-sign.yml deploys the page after merge with sign/test removed and never
-# runs the suite, and pull_request.yml ignores sign/** because no job there reads
-# it. This workflow runs the suite on pull requests into main that touch sign/**
-# (or this file), so a regression in the signing flows is caught before merge,
-# and again on the same changes pushed to main. The push run is a signal after
-# the fact: pages-sign.yml deploys in parallel and does not wait for it.
+# CI. pages-sign.yml, the only workflow that touches sign/, triggers on push to
+# main and workflow_dispatch, copies sign/ to _site/sign/ with sign/test removed,
+# and runs no test command. pull_request.yml has no job that reads sign/ and no
+# paths filter that selects it, so its gate builds the Rust workspace on a sign/
+# change and never runs this suite. This workflow runs it on pull requests into
+# main that touch sign/** (or this file), so a regression in the signing flows is
+# caught before merge, and again on the same changes pushed to main. The push run
+# is a signal after the fact: pages-sign.yml deploys in parallel and does not wait
+# for it.
 #
 # sign/ has vendored dependencies (sign/vendor, checksums in
 # sign/vendor/SHA256SUMS) and no package.json, so no install step runs.
