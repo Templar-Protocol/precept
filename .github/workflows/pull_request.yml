@@ -5,10 +5,13 @@ name: pull_request
 # matches paths-ignore: documentation, and the parts of the repository that no
 # job here reads and that have their own gate: the registry and its configs
 # (registry.yml, pool-plan.yml), the deployer in tools/abtest (abtest.yml), the
-# signing page in sign/ (pages-sign.yml), the docs checker (docs.yml), and those
-# workflows themselves. No contract crate reads these paths; the deployer
-# consumes built wasm, it does not compile the workspace. A change that also
-# touches anything else still runs the whole gate.
+# signing page in sign/ (pages-sign.yml), the docs checker (docs.yml), and the
+# abtest, docs, pages-sign and registry workflow files. No contract crate reads
+# these paths; the deployer consumes built wasm, it does not compile the
+# workspace. pool-deploy.yml and pool-plan.yml are not ignored: they authorise
+# mainnet deploys, and a change to one of them cannot be gated by itself, so it
+# runs the whole gate. A change that also touches anything else still runs the
+# whole gate.
 on:
   push:
     branches:
@@ -30,8 +33,6 @@ on:
       - .github/workflows/abtest.yml
       - .github/workflows/docs.yml
       - .github/workflows/pages-sign.yml
-      - .github/workflows/pool-deploy.yml
-      - .github/workflows/pool-plan.yml
       - .github/workflows/registry.yml
   pull_request:
     branches:
@@ -53,8 +54,6 @@ on:
       - .github/workflows/abtest.yml
       - .github/workflows/docs.yml
       - .github/workflows/pages-sign.yml
-      - .github/workflows/pool-deploy.yml
-      - .github/workflows/pool-plan.yml
       - .github/workflows/registry.yml
 
 # No job here writes to the repository: they check formatting, build, test, run
