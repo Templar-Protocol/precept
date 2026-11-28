@@ -66,7 +66,8 @@ jobs:
         working-directory: sign
         run: |
           set -euo pipefail
-          # sudo resets PATH to secure_path, so pass the runner's bun by absolute path
+          # sudo does not inherit this step's PATH (the first isolated run failed with
+          # "unshare: failed to execute bun: No such file or directory"), so resolve it here
           BUN="$(command -v bun)"
           # the namespace must actually have no route out, or the isolation claim is false
           sudo unshare --net ip route | (! grep -q .)
