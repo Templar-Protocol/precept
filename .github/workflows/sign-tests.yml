@@ -10,8 +10,12 @@ name: sign-tests
 # sign/ has vendored dependencies (sign/vendor, checksums in
 # sign/vendor/SHA256SUMS) and no package.json, so no install step runs. Of the
 # files under sign/test, bun's default discovery matches the five *.test.mjs
-# files, which make no network calls; testnet-rehearsal.mjs, the only file there
-# that opens a socket (it calls friendbot), is not matched.
+# files and not testnet-rehearsal.mjs, the only file there that opens a socket
+# (it calls friendbot and the pool RPC through sign/rpc.mjs). The matched tests
+# do reach sign/rpc.mjs, but only its pure helpers (checkSignedEnvelope,
+# explain); the fetch path there is exercised only by testnet-rehearsal.mjs.
+# The suite needs no network: `unshare -n bun test` in sign/ passes all 261
+# tests with networking removed.
 #
 # Every action is pinned to a full commit SHA — tags move, SHAs do not — and the
 # Bun runtime is pinned with it, because the installer's SHA pins only the
