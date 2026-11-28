@@ -1,8 +1,24 @@
 name: pull_request
 
-# Documentation-only changes skip this workflow (build, tests, Kani, Verus,
-# fuzz). A change runs it unless every touched file matches paths-ignore;
-# no build or test reads these paths. docs/ has its own gate in docs.yml.
+# The contract gate (build, tests, Kani, Verus, fuzz) runs only when a change
+# can reach what it builds or proves. A change skips it when every touched file
+# matches paths-ignore: documentation, and parts of the repository that no job
+# here reads. These have their own pull request gate: the registry and its
+# configs, plus the deploy helper scripts/pool_deploy_ci.py and its test
+# (registry.yml, whose pull_request trigger filters only on the main branch, so
+# it runs on every pull request into main, with no paths filter, and runs that
+# test; only its push trigger is path-filtered); the
+# deployer in tools/abtest (abtest.yml); the docs checker scripts/check_docs.py
+# and its test (docs.yml); and those workflow files. The signing page in sign/
+# and pages-sign.yml have none: the `on:` block of pages-sign.yml is push to
+# main and workflow_dispatch only, and it builds and deploys the page with its
+# test/ directory removed, without running it. No job here ran those tests
+# either, so a change to sign/ is checked by review and the local
+# `cd sign && bun test` alone. No contract crate reads these paths; the deployer
+# consumes built wasm, it does not compile the workspace. pool-deploy.yml and
+# pool-plan.yml are not ignored: they authorise mainnet deploys, and a change to
+# one of them cannot be gated by itself, so it runs the whole gate. A change
+# that also touches anything else still runs the whole gate.
 on:
   push:
     branches:
@@ -14,6 +30,17 @@ on:
       - audits/**
       - .gitbook.yaml
       - LICENSE
+      - registry/**
+      - tools/abtest/**
+      - sign/**
+      - scripts/pool_deploy_ci.py
+      - scripts/test_pool_deploy_ci.py
+      - scripts/check_docs.py
+      - scripts/test_check_docs.py
+      - .github/workflows/abtest.yml
+      - .github/workflows/docs.yml
+      - .github/workflows/pages-sign.yml
+      - .github/workflows/registry.yml
   pull_request:
     branches:
       - main
@@ -24,6 +51,17 @@ on:
       - audits/**
       - .gitbook.yaml
       - LICENSE
+      - registry/**
+      - tools/abtest/**
+      - sign/**
+      - scripts/pool_deploy_ci.py
+      - scripts/test_pool_deploy_ci.py
+      - scripts/check_docs.py
+      - scripts/test_check_docs.py
+      - .github/workflows/abtest.yml
+      - .github/workflows/docs.yml
+      - .github/workflows/pages-sign.yml
+      - .github/workflows/registry.yml
 
 # No job here writes to the repository: they check formatting, build, test, run
 # provers and replay/build the fuzz target. Without this, GITHUB_TOKEN takes the
