@@ -63,6 +63,8 @@ jobs:
         working-directory: sign
         run: |
           set -euo pipefail
+          # sudo resets PATH to secure_path, so pass the runner's bun by absolute path
+          BUN="$(command -v bun)"
           # the namespace must actually have no route out, or the isolation claim is false
           sudo unshare --net ip route | (! grep -q .)
-          sudo unshare --net bun test
+          sudo unshare --net "$BUN" test
