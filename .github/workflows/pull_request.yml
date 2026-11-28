@@ -6,7 +6,7 @@ name: pull_request
 # here reads. These have their own pull request gate: the registry and its
 # configs, plus the deploy helper scripts/pool_deploy_ci.py and its test
 # (registry.yml, whose pull_request trigger filters only on the main branch, so
-# it runs on every pull request into main, as this workflow does, and runs that
+# it runs on every pull request into main, with no paths filter, and runs that
 # test; only its push trigger is path-filtered); the
 # deployer in tools/abtest (abtest.yml); the docs checker scripts/check_docs.py
 # and its test (docs.yml); and those workflow files. The signing page in sign/
