@@ -3,17 +3,23 @@ name: sign-tests
 # CI: pages-sign.yml deploys the page after merge with sign/test removed and never
 # runs the suite, and pull_request.yml ignores sign/** because no job there reads
 # it. This workflow runs the suite on pull requests into main that touch sign/**
-# (or this file), and on the same changes pushed to main, so a regression in the
-# signing flows is caught before it ships. sign/ has vendored dependencies
-# (sign/vendor, checksums in sign/vendor/SHA256SUMS) and no package.json, so no
-# install step runs. Every action is pinned to a full commit SHA — tags move,
-# SHAs do not:
+# (or this file), so a regression in the signing flows is caught before merge,
+# and again on the same changes pushed to main. The push run is a signal after
+# the fact: pages-sign.yml deploys in parallel and does not wait for it.
+#
+# sign/ has vendored dependencies (sign/vendor, checksums in
+# sign/vendor/SHA256SUMS) and no package.json, so no install step runs. Of the
+# files under sign/test, bun's default discovery matches the five *.test.mjs
+# files, which make no network calls; testnet-rehearsal.mjs, the only file there
+# that opens a socket (it calls friendbot), is not matched.
+#
+# Every action is pinned to a full commit SHA — tags move, SHAs do not — and the
+# Bun runtime is pinned with it, because the installer's SHA pins only the
+# installer, not the runtime it downloads:
 #
 #   actions/checkout     v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1
 #   oven-sh/setup-bun    v2.2.0  0c5077e51419868618aeaa5fe8019c62421857d6
-#
-# bun's default test discovery matches the *.test.mjs files and not the
-# testnet-rehearsal.mjs helper, which makes no network calls part of this job.
+#   Bun runtime          1.4.2   bun-version
 
 on:
   pull_request:
@@ -35,6 +41,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,6 +50,8 @@ jobs:
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
 
       - name: Run the sign tests
         working-directory: sign
