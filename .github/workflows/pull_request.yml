@@ -2,16 +2,19 @@ name: pull_request
 
 # The contract gate (build, tests, Kani, Verus, fuzz) runs only when a change
 # can reach what it builds or proves. A change skips it when every touched file
-# matches paths-ignore: documentation, and the parts of the repository that no
-# job here reads and that have their own gate: the registry and its configs
-# (registry.yml), the deployer in tools/abtest (abtest.yml), the
-# signing page in sign/ (pages-sign.yml), the docs checker (docs.yml), and the
-# abtest, docs, pages-sign and registry workflow files. No contract crate reads
-# these paths; the deployer consumes built wasm, it does not compile the
-# workspace. pool-deploy.yml and pool-plan.yml are not ignored: they authorise
-# mainnet deploys, and a change to one of them cannot be gated by itself, so it
-# runs the whole gate. A change that also touches anything else still runs the
-# whole gate.
+# matches paths-ignore: documentation, and parts of the repository that no job
+# here reads. The registry and its configs (registry.yml), the deployer in
+# tools/abtest (abtest.yml) and the docs checker (docs.yml) have their own pull
+# request gate, and so do those workflow files. The signing page in sign/ and
+# pages-sign.yml have none: pages-sign.yml runs only after merge to main (and on
+# manual dispatch), builds and deploys the page without running its tests, and
+# no job here ran them either, so a change to sign/ is checked by review and
+# the local `cd sign && bun test` alone. No contract crate reads these paths;
+# the deployer consumes built wasm, it does not compile the workspace.
+# pool-deploy.yml and pool-plan.yml are not ignored: they authorise mainnet
+# deploys, and a change to one of them cannot be gated by itself, so it runs the
+# whole gate. A change that also touches anything else still runs the whole
+# gate.
 on:
   push:
     branches:
